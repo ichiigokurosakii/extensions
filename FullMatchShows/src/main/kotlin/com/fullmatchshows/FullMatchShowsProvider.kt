@@ -2,7 +2,7 @@ package com.fullmatchshows
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.Jsoup
+import com.lagradost.cloudstream3.utils.loadExtractor
 
 class FullMatchShowsProvider : MainAPI() {
     override var mainUrl = "https://fullmatchshows.com"
@@ -10,10 +10,9 @@ class FullMatchShowsProvider : MainAPI() {
     override var lang = "en"
     override val hasMainPage = true
     override val hasQuickSearch = false
-    override val hasSearch = true
     override val supportedTypes = setOf(TvType.TvSeries)
 
-    private fun doc(url: String) = app.get(url, timeout = 20).document
+    private suspend fun doc(url: String) = app.get(url, timeout = 20).document
 
     private fun cards(document: org.jsoup.nodes.Document): List<SearchResponse> {
         val candidates = document.select(
@@ -45,7 +44,7 @@ class FullMatchShowsProvider : MainAPI() {
         )
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
+    override suspend fun search(query: String): List<SearchResponse>? {
         val encoded = java.net.URLEncoder.encode(query, "UTF-8")
         return cards(doc("$mainUrl/?s=$encoded"))
     }
@@ -59,7 +58,6 @@ class FullMatchShowsProvider : MainAPI() {
         val description = document.selectFirst("meta[name=description]")?.attr("content")
             ?.takeIf { it.isNotBlank() }
 
-        // Keep source labels as episode names; each episode points at its source page.
         val episodes = document.select("a[href]").mapNotNull { a ->
             val href = a.absUrl("href")
             val label = a.text().trim()
@@ -72,7 +70,10 @@ class FullMatchShowsProvider : MainAPI() {
                 "(?i)stream|server|watch|play|1080p|720p|480p|full match|match replay|embed|vid"
             ).containsMatchIn("$label $context")
             if (!looksLikeStream) return@mapNotNull null
-            Episode(data = href, name = label, season = 1)
+            newEpisode(href) {
+                name = label
+                season = 1
+            }
         }.distinctBy { it.data to it.name }.mapIndexed { index, ep ->
             ep.copy(episode = index + 1)
         }
@@ -89,9 +90,6 @@ class FullMatchShowsProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Delegate supported public embed/player pages to CloudStream's extractors.
-        // This does not attempt to bypass DRM, logins, or access controls.
-        loadExtractor(data, data, subtitleCallback, callback)
-        return true
+        return loadExtractor(data, subtitleCallback, callback)
     }
 }
