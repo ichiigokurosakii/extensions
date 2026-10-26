@@ -30,9 +30,6 @@ jobs:
         with:
           gradle-version: '8.12'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Build plugins and metadata
         run: gradle make makePluginsJson
 
