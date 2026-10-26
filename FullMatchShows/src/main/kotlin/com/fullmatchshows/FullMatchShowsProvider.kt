@@ -59,7 +59,7 @@ class FullMatchShowsProvider : MainAPI() {
         val description = document.selectFirst("meta[name=description]")?.attr("content")
             ?.takeIf { it.isNotBlank() }
 
-        // Preserve visible labels and link to the original host page; do not extract media URLs.
+        // Keep source labels as episode names; each episode points at its source page.
         val episodes = document.select("a[href]").mapNotNull { a ->
             val href = a.absUrl("href")
             val label = a.text().trim()
@@ -89,7 +89,9 @@ class FullMatchShowsProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Stream entries are external page links, not extracted or playable media URLs.
-        return false
+        // Delegate supported public embed/player pages to CloudStream's extractors.
+        // This does not attempt to bypass DRM, logins, or access controls.
+        loadExtractor(data, data, subtitleCallback, callback)
+        return true
     }
 }
