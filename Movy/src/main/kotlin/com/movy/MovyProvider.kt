@@ -17,7 +17,7 @@ class MovyProvider : MainAPI() {
     // Keep the three confirmed catalogue routes; avoid speculative routes that can return empty pages.
     override val mainPage = listOf(
         MainPageData("Movies", "$mainUrl/browse/movie", horizontalImages = true),
-        MainPageData("TV Shows", "$mainUrl/browse/show", horizontalImages = true),
+        MainPageData("TV Shows", "$mainUrl/browse/tv", horizontalImages = true),
         MainPageData("Anime", "$mainUrl/browse/anime", horizontalImages = true)
     )
 
@@ -31,27 +31,33 @@ class MovyProvider : MainAPI() {
     }
 
     private fun posterOf(element: Element, document: Document): String? {
-        // Movy uses lazy-loaded and Next.js image elements; inspect the link and
-        // a few nearby wrappers because the poster is not always inside the anchor.
+        // Posters can be lazy-loaded or wrapped by Next.js image optimization.
         val candidates = mutableListOf<Element>()
         var current: Element? = element
-        repeat(5) {
+        repeat(6) {
             current?.let { candidates.add(it) }
             current = current?.parent()
         }
-        val image = candidates.firstNotNullOfOrNull { it.selectFirst("img") }
-        val raw = image?.let {
-            listOf("data-src", "data-lazy-src", "data-original", "data-image", "src")
-                .firstNotNullOfOrNull { key -> it.attr(key).takeIf(String::isNotBlank) }
-                ?.takeIf { value -> !value.startsWith("data:image") }
-                ?: it.attr("srcset").split(",").firstOrNull()?.trim()?.substringBefore(" ")
-        }?.takeIf(String::isNotBlank) ?: candidates.firstNotNullOfOrNull { candidate ->
-            candidate.attr("data-poster").takeIf(String::isNotBlank)
-                ?: candidate.attr("data-image").takeIf(String::isNotBlank)
-                ?: Regex("""(?i)background-image\s*:\s*url\(['"]?([^)'"]+)""")
-                    .find(candidate.attr("style"))?.groupValues?.getOrNull(1)
+        fun imageUrl(img: Element): String? {
+            listOf("data-poster", "data-src", "data-lazy-src", "data-original", "data-image", "src").forEach { key ->
+                val value = img.attr(key).trim()
+                if (value.isNotBlank() && !value.startsWith("data:image") && !value.startsWith("blob:")) return value
+            }
+            listOf("data-srcset", "srcset").forEach { key ->
+                val value = img.attr(key).split(",").firstOrNull()?.trim()?.substringBefore(" ")?.trim().orEmpty()
+                if (value.isNotBlank() && !value.startsWith("data:image")) return value
+            }
+            return null
         }
-        return raw?.takeIf(String::isNotBlank)?.let { absolute(document, it) }
+        val raw = candidates.firstNotNullOfOrNull { wrapper ->
+            wrapper.select("img, picture source").firstNotNullOfOrNull(::imageUrl)
+                ?: wrapper.attr("data-poster").takeIf(String::isNotBlank)
+                ?: wrapper.attr("data-image").takeIf(String::isNotBlank)
+                ?: wrapper.attr("data-src").takeIf(String::isNotBlank)
+                ?: Regex("""(?i)background-image\s*:\s*url\(['"]?([^)'"\s]+)""")
+                    .find(wrapper.attr("style"))?.groupValues?.getOrNull(1)
+        }
+        return raw?.let { absolute(document, it) }
     }
 
     private fun titleOf(element: Element): String {
@@ -60,7 +66,7 @@ class MovyProvider : MainAPI() {
         val imageAlt = element.selectFirst("img")?.attr("alt")?.trim()?.takeIf(String::isNotBlank)
         val attribute = element.attr("title").trim().ifBlank { element.attr("aria-label").trim() }
         val text = element.text().trim()
-        val generic = setOf("play", "watch", "watch now", "more info", "more information", "image")
+        val generic = setOf("play", "watch", "watch now", "more info", "more information", "image", "movy", "movy watch anything", "watch anything")
         val local = sequenceOf(heading, imageAlt, attribute, text)
             .filterNotNull()
             .firstOrNull {
@@ -80,7 +86,8 @@ class MovyProvider : MainAPI() {
         val path = try { java.net.URI(url).path.lowercase() } catch (_: Exception) { "" }
         return path.contains("/movie/") || path.contains("/show/") ||
             path.contains("/tv/") || path.contains("/anime/") ||
-            path.contains("/watch/") || path.contains("/title/")
+            path.contains("/series/") || path.contains("/watch/") ||
+            path.contains("/title/")
     }
 
     private fun cardElements(document: Document): List<Element> {
@@ -144,17 +151,21 @@ class MovyProvider : MainAPI() {
             ?: document.title().substringBefore(" - ").trim()
 
     private fun pagePoster(document: Document): String? {
-        val raw = document.selectFirst("meta[property=og:image]")?.attr("content")
-            ?.takeIf(String::isNotBlank)
-            ?: document.select("img").firstNotNullOfOrNull { image ->
-                listOf("data-src", "data-lazy-src", "data-original", "data-image", "src")
-                    .firstNotNullOfOrNull { key -> image.attr(key).takeIf(String::isNotBlank) }
-                    ?.takeIf { value ->
-                        !value.startsWith("data:image") &&
-                            (value.contains("image.tmdb.org") || value.contains("poster", true) || value.contains("wsrv.nl"))
-                    }
-            }
-        return raw?.let { absolute(document, it) }
+        val meta = document.selectFirst("meta[property=og:image], meta[name=twitter:image]")
+            ?.attr("content")?.takeIf(String::isNotBlank)
+        val image = document.select("img, picture source").firstNotNullOfOrNull { img ->
+            listOf("data-poster", "data-src", "data-lazy-src", "data-original", "data-image", "src")
+                .asSequence().map { img.attr(it).trim() }
+                .firstOrNull { it.isNotBlank() && !it.startsWith("data:image") && !it.startsWith("blob:") }
+                ?: listOf("data-srcset", "srcset").asSequence()
+                    .map { img.attr(it).split(",").firstOrNull()?.trim()?.substringBefore(" ")?.trim().orEmpty() }
+                    .firstOrNull { it.isNotBlank() && !it.startsWith("data:image") }
+        }
+        val background = document.select("[style*=background-image]").firstNotNullOfOrNull { el ->
+            Regex("""(?i)background-image\s*:\s*url\(['"]?([^)'"\s]+)""")
+                .find(el.attr("style"))?.groupValues?.getOrNull(1)
+        }
+        return (meta ?: image ?: background)?.let { absolute(document, it) }
     }
 
     private fun pagePlot(document: Document): String? =
@@ -198,16 +209,41 @@ class MovyProvider : MainAPI() {
         val selectors = listOf(
             ".episodes-list a[href]", ".ss-list a[href]", ".episode-list a[href]",
             ".ep-item a[href]", ".episode-item a[href]", "[data-id] a[href]",
-            "a[href*='/episode/']", "a[href*='/watch/']"
+            "[class*=episode] a[href]", "[id*=episode] a[href]",
+            "[class*=season] a[href]", "[data-testid*=episode] a[href]",
+            "a[href*='/episode']", "a[href*='/watch/']"
         )
         val result = linkedMapOf<String, Element>()
         selectors.forEach { selector ->
             document.select(selector).forEach { a ->
                 val href = a.absUrl("href").ifBlank { a.attr("href") }
-                if (href.startsWith("http") && href != document.location() &&
-                    (href.contains("/episode/") || href.contains("/watch/") ||
-                        a.parent()?.classNames()?.any { it.contains("ep") } == true)
+                val label = (a.text() + " " + a.attr("title") + " " + a.attr("aria-label") +
+                    " " + a.className() + " " + a.parent()?.className().orEmpty())
+                val episodeLike = Regex(
+                    "(?i)(?:/episode(?:[-_/]|$)|episode\\s*[-:#]?\\s*\\d+|\\bep\\.?\\s*\\d+|\\bs\\d{1,2}e\\d{1,3}\\b)"
+                ).containsMatchIn("$href $label") ||
+                    a.parents().take(4).any { p ->
+                        p.className().contains("episode", true) ||
+                            p.className().contains("ep-item", true) ||
+                            p.id().contains("episode", true)
+                    }
+                if (href.startsWith("http") && href.trimEnd('/') != document.location().trimEnd('/') &&
+                    episodeLike && isInternalContentUrl(href)
                 ) result.putIfAbsent(href, a)
+            }
+        }
+        // Some builds serialize episode URLs in Next.js state rather than ordinary anchors.
+        document.select("script#__NEXT_DATA__, script[type=application/json]").forEach { script ->
+            val state = script.data().ifBlank { script.html() }
+            val pathPattern = Regex("""(?i)["']((?:https?:\\/\\/[^"']+)?/?(?:anime|tv|show|series)/[^"'\s]*(?:episode[-_/]?\d+|ep[-_/]?\d+|s\d+e\d+)[^"'\s]*)["']""")
+            pathPattern.findAll(state).forEach { match ->
+                val raw = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
+                val href = absolute(document, raw)
+                if (href.startsWith("http") && href.trimEnd('/') != document.location().trimEnd('/')) {
+                    val number = Regex("(?i)(?:episode|ep|e)[-_/ ]*0*(\\d+)").find(raw)?.groupValues?.getOrNull(1)
+                    val synthetic = Element("a").attr("href", href).text("Episode " + (number ?: (result.size + 1).toString()))
+                    result.putIfAbsent(href, synthetic)
+                }
             }
         }
         return result.values.toList()
