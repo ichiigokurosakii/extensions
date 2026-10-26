@@ -40,7 +40,7 @@ subprojects {
     }
 
     android {
-        namespace = "com.fullmatchshows.extension"
+        namespace = "com.${project.name.lowercase().replace(Regex("[^a-z0-9]"), "")}.extension"
 
         defaultConfig {
             minSdk = 21

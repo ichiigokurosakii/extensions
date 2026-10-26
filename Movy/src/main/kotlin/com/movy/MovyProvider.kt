@@ -1,0 +1,277 @@
+package com.movy
+
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
+import java.net.URLEncoder
+
+class MovyProvider : MainAPI() {
+    override var mainUrl = "https://www.movy.sx"
+    override var name = "Movy"
+    override var lang = "en"
+    override val hasMainPage = true
+    override val hasQuickSearch = true
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
+
+    // These routes are intentionally kept in one place so they can be adjusted if Movy changes its URLs.
+    override val mainPage = listOf(
+        MainPageRequest("Movies", "$mainUrl/browse/movie"),
+        MainPageRequest("TV Shows", "$mainUrl/browse/show"),
+        MainPageRequest("Anime", "$mainUrl/browse/anime"),
+        MainPageRequest("Trending", "$mainUrl/browse/trending"),
+        MainPageRequest("Popular", "$mainUrl/browse/popular"),
+        MainPageRequest("Recently Added", "$mainUrl/browse/recent")
+    )
+
+    private suspend fun getDocument(url: String): Document =
+        app.get(url, timeout = 25).document
+
+    private fun absolute(document: Document, raw: String): String {
+        if (raw.isBlank()) return ""
+        return try { document.location().let { java.net.URL(java.net.URL(it), raw).toString() } }
+        catch (_: Exception) { raw }
+    }
+
+    private fun posterOf(element: Element, document: Document): String? {
+        val image = element.selectFirst("img")
+        val raw = image?.let {
+            listOf("data-src", "data-lazy-src", "data-original", "src").firstNotNullOfOrNull { key ->
+                it.attr(key).takeIf(String::isNotBlank)
+            }
+        } ?: element.attr("data-poster")
+        return raw.takeIf(String::isNotBlank)?.let { absolute(document, it) }
+    }
+
+    private fun titleOf(element: Element): String =
+        element.selectFirst("h2, h3, .title, .name, .film-name, .movie-title")?.text()?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?: element.attr("title").trim().ifBlank { element.text().trim() }
+
+    private fun isInternalContentUrl(url: String): Boolean {
+        val path = try { java.net.URI(url).path.lowercase() } catch (_: Exception) { "" }
+        return path.contains("/movie/") || path.contains("/show/") ||
+            path.contains("/tv/") || path.contains("/anime/") ||
+            path.contains("/watch/") || path.contains("/title/")
+    }
+
+    private fun cardElements(document: Document): List<Element> {
+        val selectors = listOf(
+            ".flw-item", ".film_list-wrap .item", ".film-poster", ".movie-item",
+            ".item.poster", ".card", "article", ".poster"
+        )
+        val found = linkedMapOf<String, Element>()
+        selectors.forEach { selector ->
+            document.select(selector).forEach { card ->
+                val anchor = card.selectFirst("a[href]") ?: return@forEach
+                val href = anchor.absUrl("href").ifBlank { anchor.attr("href") }
+                if (isInternalContentUrl(href)) found.putIfAbsent(href.trimEnd('/'), card)
+            }
+        }
+        if (found.isEmpty()) {
+            document.select("a[href]").forEach { anchor ->
+                val href = anchor.absUrl("href").ifBlank { anchor.attr("href") }
+                if (isInternalContentUrl(href)) found.putIfAbsent(href.trimEnd('/'), anchor.parent() ?: anchor)
+            }
+        }
+        return found.values.toList()
+    }
+
+    private fun searchResponses(document: Document): List<SearchResponse> {
+        val seen = mutableSetOf<String>()
+        return cardElements(document).mapNotNull { card ->
+            val anchor = card.select("a[href]").firstOrNull { a ->
+                val href = a.absUrl("href").ifBlank { a.attr("href") }
+                isInternalContentUrl(href)
+            } ?: return@mapNotNull null
+            val url = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
+            val title = titleOf(card).ifBlank { titleOf(anchor) }
+            if (title.isBlank() || url.isBlank() || !seen.add(url)) return@mapNotNull null
+            val poster = posterOf(card, document)
+            val isMovie = url.contains("/movie/")
+            val isAnime = url.contains("/anime/")
+            if (isMovie) newMovieSearchResponse(title, url, TvType.Movie) {
+                posterUrl = poster
+            } else newTvSeriesSearchResponse(title, url, if (isAnime) TvType.Anime else TvType.TvSeries) {
+                posterUrl = poster
+            }
+        }
+    }
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val base = request.data
+        val url = when {
+            page <= 1 -> base
+            base.contains("?") -> "$base&page=$page"
+            else -> "$base?page=$page"
+        }
+        val document = getDocument(url)
+        val results = searchResponses(document)
+        val sectionName = request.name
+        return newHomePageResponse(
+            listOf(HomePageList(sectionName, results, isHorizontalImages = true)),
+            hasNext = results.isNotEmpty()
+        )
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val document = getDocument("$mainUrl/search?keyword=$encoded")
+        val results = searchResponses(document)
+        if (results.isNotEmpty()) return results
+        return searchResponses(getDocument("$mainUrl/?s=$encoded"))
+    }
+
+    private fun pageTitle(document: Document): String =
+        document.selectFirst("h1, .heading-name, .film-name, .movie-title, .detail-title")
+            ?.text()?.trim()?.takeIf(String::isNotBlank)
+            ?: document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
+            ?: document.title().substringBefore(" - ").trim()
+
+    private fun pagePoster(document: Document): String? {
+        val raw = document.selectFirst("meta[property=og:image]")?.attr("content")
+            ?.takeIf(String::isNotBlank)
+            ?: document.selectFirst(".film-poster img, .detail-poster img, .cover img, .poster img")
+                ?.let { listOf("data-src", "data-lazy-src", "src").firstNotNullOfOrNull { key -> it.attr(key).takeIf(String::isNotBlank) } }
+        return raw?.let { absolute(document, it) }
+    }
+
+    private fun pagePlot(document: Document): String? =
+        document.selectFirst("meta[name=description]")?.attr("content")?.takeIf(String::isNotBlank)
+            ?: document.selectFirst(".description, .film-description, .content, .overview")?.text()?.trim()
+                ?.takeIf(String::isNotBlank)
+
+    private fun sourcesFrom(document: Document, pageUrl: String): List<Pair<String, String>> {
+        val output = linkedMapOf<String, String>()
+        val sourcePattern = Regex("(?i)(?:source|server|watch|play|stream)\\s*[:：-]?\\s*([A-Za-z0-9 _.-]{0,40})")
+        document.select("a[href], iframe[src], source[src], [data-src], [data-url], [data-link]").forEach { el ->
+            val raw = when (el.tagName()) {
+                "iframe", "source" -> el.attr("src")
+                else -> listOf("href", "data-src", "data-url", "data-link").firstNotNullOfOrNull { el.attr(it).takeIf(String::isNotBlank) }.orEmpty()
+            }
+            val url = absolute(document, raw)
+            if (!url.startsWith("http") || url == pageUrl || url.contains("movy.sx/") && !url.contains("/embed/")) return@forEach
+            val label = el.text().trim().ifBlank {
+                el.attr("title").ifBlank { el.attr("aria-label") }
+            }.ifBlank {
+                val context = el.parent()?.text().orEmpty()
+                sourcePattern.find(context)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+            }.ifBlank { "Source ${output.size + 1}" }
+            if (url !in output) output[url] = label.take(80)
+        }
+
+        // Some players keep embed URLs in JavaScript configuration rather than DOM attributes.
+        val scriptUrlPattern = Regex("""(?i)(?:file|src|source|url|embedUrl|iframeUrl)\s*[:=]\s*["'](https?://[^"'\\s<>]+)["']""")
+        document.select("script").forEach { script ->
+            scriptUrlPattern.findAll(script.data() + script.html()).forEach { match ->
+                val url = match.groupValues.getOrNull(1).orEmpty().trimEnd(',', ';')
+                if (url.startsWith("http") && url !in output && !url.contains("movy.sx/")) {
+                    output[url] = "Source ${output.size + 1}"
+                }
+            }
+        }
+        return output.map { it.key to it.value }
+    }
+
+    private fun episodeElements(document: Document): List<Element> {
+        val selectors = listOf(
+            ".episodes-list a[href]", ".ss-list a[href]", ".episode-list a[href]",
+            ".ep-item a[href]", ".episode-item a[href]", "[data-id] a[href]",
+            "a[href*='/episode/']", "a[href*='/watch/']"
+        )
+        val result = linkedMapOf<String, Element>()
+        selectors.forEach { selector ->
+            document.select(selector).forEach { a ->
+                val href = a.absUrl("href").ifBlank { a.attr("href") }
+                if (href.startsWith("http") && href != document.location() &&
+                    (href.contains("/episode/") || href.contains("/watch/") ||
+                        a.parent()?.classNames()?.any { it.contains("ep") } == true)
+                ) result.putIfAbsent(href, a)
+            }
+        }
+        return result.values.toList()
+    }
+
+    override suspend fun load(url: String): LoadResponse {
+        val document = getDocument(url)
+        val title = pageTitle(document)
+        val poster = pagePoster(document)
+        val plot = pagePlot(document)
+        val tags = document.select(".genres a, .film-genre a, a[href*='/genre/']").map { it.text().trim() }.filter(String::isNotBlank).distinct()
+        val isMovie = url.contains("/movie/") || document.selectFirst("meta[property='og:type']")?.attr("content") == "video.movie"
+        if (isMovie) {
+            return newMovieLoadResponse(title, url, TvType.Movie, url) {
+                posterUrl = poster
+                this.plot = plot
+                this.tags = tags
+            }
+        }
+
+        val episodeLinks = episodeElements(document)
+        val episodes = if (episodeLinks.isNotEmpty()) {
+            episodeLinks.mapIndexed { index, element ->
+                val href = element.absUrl("href").ifBlank { element.attr("href") }
+                val label = element.text().trim().ifBlank { "Episode ${index + 1}" }
+                val episodeNumber = Regex("(?i)(?:episode|ep|e)\\s*0*(\\d+)").find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    ?: (index + 1)
+                newEpisode(href) {
+                    name = label
+                    season = Regex("(?i)(?:season|s)\\s*0*(\\d+)").find(label)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+                    episode = episodeNumber
+                    posterUrl = poster
+                }
+            }
+        } else {
+            // A detail page without an episode list is still exposed as one playable entry.
+            listOf(newEpisode(url) {
+                name = title
+                season = 1
+                episode = 1
+                posterUrl = poster
+            })
+        }
+        return newTvSeriesLoadResponse(title, url, if (url.contains("/anime/")) TvType.Anime else TvType.TvSeries, episodes) {
+            posterUrl = poster
+            this.plot = plot
+            this.tags = tags
+        }
+    }
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val document = getDocument(data)
+        val sources = sourcesFrom(document, data)
+        if (sources.isEmpty()) {
+            // Let CloudStream's extractor registry handle the page itself as a fallback.
+            return loadExtractor(data, subtitleCallback, callback)
+        }
+        var found = false
+        sources.forEach { (url, label) ->
+            try {
+                val handled = loadExtractor(url, subtitleCallback) { link ->
+                    callback(link.copy(name = label.ifBlank { link.name }))
+                    found = true
+                }
+                if (!handled) {
+                    // Keep direct video links available when no extractor is registered.
+                    if (url.matches(Regex("(?i)^https?://.*\\.(m3u8|mp4|mpd)(?:\\?.*)?$"))) {
+                        callback(
+                            newExtractorLink(
+                                source = "Movy",
+                                name = label,
+                                url = url,
+                                type = if (url.contains(".mp4", true)) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                            )
+                        )
+                        found = true
+                    }
+                } else found = true
+            } catch (_: Exception) { }
+        }
+        return found
+    }
+}
