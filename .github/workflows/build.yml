@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: cloudstream-build
+  group: cloudstream-build-v2
   cancel-in-progress: true
 
 jobs:
