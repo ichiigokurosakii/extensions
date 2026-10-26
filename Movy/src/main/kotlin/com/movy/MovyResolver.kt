@@ -15,6 +15,7 @@ import java.util.Base64
  */
 internal object MovyResolver {
     private const val API = "https://api.wecollege.net"
+    private const val DB_API = "https://db.wecollege.net/3"
     private const val REFERER = "https://www.movy.sx/"
     private val nodes = listOf(
         "miami", "boise", "vegas", "reno", "oakland", "seattle", "phoenix",
@@ -34,24 +35,35 @@ internal object MovyResolver {
         val isMovie = pageUrl.contains("/movie/") ||
             doc.selectFirst("meta[property='og:type']")?.attr("content") == "video.movie"
         val mediaType = if (isMovie) "movie" else "tv"
-        val titleRaw = doc.selectFirst("meta[property='og:title']")?.attr("content")
+        val pageTitleRaw = doc.selectFirst("meta[property='og:title']")?.attr("content")
             ?.takeIf { it.isNotBlank() } ?: doc.selectFirst("h1, .heading-name, .film-name")?.text()
             ?: doc.title()
-        val title = titleRaw.substringBefore(" | ").substringBefore(" - Episode")
+        val pageTitle = pageTitleRaw.substringBefore(" | ").substringBefore(" - Episode")
             .substringBefore(" - Season").substringBefore(" Season ").trim()
-        if (title.isBlank()) return emptyList()
-        val year = Regex("\\b(19\\d{2}|20\\d{2})\\b").find(
+        val pageYear = Regex("\\b(19\\d{2}|20\\d{2})\\b").find(
             doc.selectFirst("meta[property='og:title']")?.attr("content").orEmpty() + " " +
                 doc.selectFirst("meta[name=description]")?.attr("content").orEmpty() + " " + html.take(30000)
         )?.groupValues?.get(1).orEmpty()
-        val imdbId = Regex("tt\\d{7,9}").find(html)?.value.orEmpty()
         val seasonEpisode = findSeasonEpisode(pageUrl, html, doc)
-        val seed = try {
-            val seedDoc = app.get("$API/seed?mediaId=$tmdbId", headers = headers, timeout = 15).text
-            JSONObject(seedDoc).optString("seed").takeIf { it.isNotBlank() } ?: return emptyList()
-        } catch (_: Exception) {
-            return emptyList()
+
+        // The page's serialized Next.js state can contain stale/secondary IDs and
+        // display titles are not always TMDB-canonical. Ask Movy's own TMDB proxy
+        // for canonical title/year/IMDb/season metadata while fetching the seed.
+        val initial = coroutineScope {
+            val metadataTask = async { fetchMetadata(mediaType, tmdbId) }
+            val seedTask = async { fetchSeed(tmdbId) }
+            metadataTask.await() to seedTask.await()
         }
+        val metadata = initial.first
+        val seed = initial.second ?: return emptyList()
+        val title = metadata?.optString(if (isMovie) "title" else "name")
+            ?.takeIf { it.isNotBlank() && it != "null" } ?: pageTitle
+        if (title.isBlank()) return emptyList()
+        val releaseDate = metadata?.optString(if (isMovie) "release_date" else "first_air_date").orEmpty()
+        val year = releaseDate.takeIf { it.length >= 4 }?.take(4) ?: pageYear
+        val imdbId = metadata?.optString("imdb_id").orEmpty().takeIf { it.startsWith("tt") }
+            ?: metadata?.optJSONObject("external_ids")?.optString("imdb_id")?.takeIf { it.startsWith("tt") }
+            ?: Regex("tt\\d{7,9}").find(html)?.value.orEmpty()
 
         val params = linkedMapOf(
             "title" to title,
@@ -64,8 +76,9 @@ internal object MovyResolver {
             "enc" to "2",
             "seed" to seed
         )
-        val totalSeasons = Regex("(?i)number_of_seasons[\\\"']?\\s*[:=]\\s*[\\\"']?(\\d+)")
-            .find(html)?.groupValues?.getOrNull(1)
+        val totalSeasons = metadata?.optInt("number_of_seasons", 0)?.takeIf { it > 0 }?.toString()
+            ?: Regex("(?i)number_of_seasons[\\\"']?\\s*[:=]\\s*[\\\"']?(\\d+)")
+                .find(html)?.groupValues?.getOrNull(1)
         if (!totalSeasons.isNullOrBlank()) params["totalSeasons"] = totalSeasons
 
         // Query the independent source shards concurrently. Serial 12-second
@@ -111,6 +124,25 @@ internal object MovyResolver {
         val results = linkedMapOf<String, String>()
         nodeResults.flatten().forEach { (url, label) -> results.putIfAbsent(url, label) }
         return results.map { it.key to it.value }
+    }
+
+    private suspend fun fetchMetadata(mediaType: String, tmdbId: Int): JSONObject? {
+        return try {
+            val url = "$DB_API/$mediaType/$tmdbId?append_to_response=external_ids&language=en-US"
+            val body = app.get(url, headers = headers, timeout = 10).text
+            JSONObject(body).takeIf { it.optInt("id", 0) == tmdbId }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun fetchSeed(tmdbId: Int): String? {
+        return try {
+            val body = app.get("$API/seed?mediaId=$tmdbId", headers = headers, timeout = 12).text
+            JSONObject(body).optString("seed").takeIf { it.isNotBlank() && it != "null" }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun findTmdbId(pageUrl: String, html: String, doc: Document): Int? {
