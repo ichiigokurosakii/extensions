@@ -63,7 +63,12 @@ class MovyProvider : MainAPI() {
         val generic = setOf("play", "watch", "watch now", "more info", "more information", "image")
         val local = sequenceOf(heading, imageAlt, attribute, text)
             .filterNotNull()
-            .firstOrNull { it.isNotBlank() && it.lowercase() !in generic }
+            .firstOrNull {
+                val value = it.lowercase()
+                it.isNotBlank() && value !in generic &&
+                    !value.startsWith("play ") && !value.startsWith("watch ") &&
+                    !value.contains("more info") && !value.contains("more information")
+            }
         if (!local.isNullOrBlank()) return local
         return element.parent()?.let { parent ->
             parent.selectFirst("h1, h2, h3, .title, .name, .film-name, .movie-title")
