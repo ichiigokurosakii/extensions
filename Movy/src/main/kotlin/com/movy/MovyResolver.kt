@@ -67,43 +67,37 @@ internal object MovyResolver {
         if (!totalSeasons.isNullOrBlank()) params["totalSeasons"] = totalSeasons
 
         val results = linkedMapOf<String, String>()
-        // Query all nodes concurrently; each successful response is independently decrypted.
-        kotlinx.coroutines.coroutineScope {
-            nodes.map { node ->
-                async(kotlinx.coroutines.Dispatchers.IO) {
-                    try {
-                        val query = params.entries.joinToString("&") {
-                            URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
-                        }
-                        val response = app.get("$API/$node/sources?$query", headers = headers, timeout = 12).text.trim()
-                        val plain = decrypt(response, seed, tmdbId) ?: return@async emptyList<Pair<String, String>>()
-                        val json = JSONObject(plain)
-                        val found = mutableListOf<Pair<String, String>>()
-                        val sources = json.optJSONArray("sources")
-                        if (sources != null) {
-                            for (i in 0 until sources.length()) {
-                                val item = sources.optJSONObject(i) ?: continue
-                                val url = item.optString("url").ifBlank { item.optString("file") }.trim()
-                                if (!url.startsWith("http")) continue
-                                val quality = item.optString("quality").ifBlank { "Auto" }
-                                found += url to "Movy · $quality"
-                            }
-                        }
-                        val audio = json.optJSONArray("audio")
-                        if (audio != null) {
-                            for (i in 0 until audio.length()) {
-                                val item = audio.optJSONObject(i) ?: continue
-                                val url = item.optString("url").ifBlank { item.optString("file") }.trim()
-                                if (url.startsWith("http")) found += url to ("Movy · " + item.optString("lang", "Auto"))
-                            }
-                        }
-                        found
-                    } catch (_: Exception) {
-                        emptyList()
+        // Resolve nodes sequentially so this module does not require kotlinx.coroutines.
+        for (node in nodes) {
+            try {
+                val query = params.entries.joinToString("&") {
+                    URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
+                }
+                val response = app.get("$API/$node/sources?$query", headers = headers, timeout = 12).text.trim()
+                val plain = decrypt(response, seed, tmdbId) ?: continue
+                val json = JSONObject(plain)
+                val sources = json.optJSONArray("sources")
+                if (sources != null) {
+                    for (i in 0 until sources.length()) {
+                        val item = sources.optJSONObject(i) ?: continue
+                        val url = item.optString("url").ifBlank { item.optString("file") }.trim()
+                        if (!url.startsWith("http")) continue
+                        val quality = item.optString("quality").ifBlank { "Auto" }
+                        results.putIfAbsent(url, "Movy · $quality")
                     }
                 }
-            }.forEach { deferred ->
-                deferred.await().forEach { (url, label) -> results.putIfAbsent(url, label) }
+                val audio = json.optJSONArray("audio")
+                if (audio != null) {
+                    for (i in 0 until audio.length()) {
+                        val item = audio.optJSONObject(i) ?: continue
+                        val url = item.optString("url").ifBlank { item.optString("file") }.trim()
+                        if (url.startsWith("http")) {
+                            results.putIfAbsent(url, "Movy · " + item.optString("lang", "Auto"))
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // A failed node should not prevent trying the remaining nodes.
             }
         }
         return results.map { it.key to it.value }
