@@ -1,6 +1,14 @@
-# FullMatchShows — CloudStream extension
+# Rupinder's Extensions
 
-A CloudStream provider for browsing match replay pages on [FullMatchShows](https://fullmatchshows.com/).
+Welcome to **Rupinder's Extensions**! This GitHub repository contains extensions developed and maintained by Rupinder for CloudStream.
+
+## Available Extensions
+
+### Full Match Shows
+
+**Full Match Shows** lets you browse and stream complete past sports matches, including match replays available through supported websites.
+
+The extension helps you find previously played matches and access available streams directly through CloudStream.
 
 ## Features
 
@@ -9,10 +17,14 @@ A CloudStream provider for browsing match replay pages on [FullMatchShows](https
 - Preserve stream labels as displayed on the page where available.
 - Uses the source site's publicly accessible pages and embeds; it does not bypass DRM, authentication, or access controls.
 
-## Build
+## Disclaimer & DMCA Notice
 
-The GitHub Actions workflow builds the extension on pushes and pull requests. Build artifacts are available from the workflow run.
+These extensions function similarly to a web browser by accessing third-party websites and retrieving publicly available content and video streams. They do not host, store, or upload video files on this GitHub repository or through the CloudStream application.
 
-## Disclaimer
+All content accessed through these extensions is provided by third-party websites and their respective hosting services. Rupinder and the contributors to this repository do not claim ownership of third-party content accessed through these extensions.
 
-This project is an independent third-party extension and is not affiliated with FullMatchShows or CloudStream. Only access content you are authorized to view and comply with applicable law and the source site's terms.
+Users are responsible for ensuring that their access to and use of any content complies with the applicable laws and regulations in their country or region.
+
+If you believe that any content accessible through an extension infringes your copyright or other intellectual property rights, please contact the relevant website or hosting provider responsible for that content.
+
+**Thank you for using Rupinder's Extensions!**
