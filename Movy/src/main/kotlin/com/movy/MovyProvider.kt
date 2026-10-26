@@ -16,12 +16,12 @@ class MovyProvider : MainAPI() {
 
     // These routes are intentionally kept in one place so they can be adjusted if Movy changes its URLs.
     override val mainPage = listOf(
-        MainPageRequest("Movies", "$mainUrl/browse/movie"),
-        MainPageRequest("TV Shows", "$mainUrl/browse/show"),
-        MainPageRequest("Anime", "$mainUrl/browse/anime"),
-        MainPageRequest("Trending", "$mainUrl/browse/trending"),
-        MainPageRequest("Popular", "$mainUrl/browse/popular"),
-        MainPageRequest("Recently Added", "$mainUrl/browse/recent")
+        MainPageData("Movies", "$mainUrl/browse/movie", horizontalImages = true),
+        MainPageData("TV Shows", "$mainUrl/browse/show", horizontalImages = true),
+        MainPageData("Anime", "$mainUrl/browse/anime", horizontalImages = true),
+        MainPageData("Trending", "$mainUrl/browse/trending", horizontalImages = true),
+        MainPageData("Popular", "$mainUrl/browse/popular", horizontalImages = true),
+        MainPageData("Recently Added", "$mainUrl/browse/recent", horizontalImages = true)
     )
 
     private suspend fun getDocument(url: String): Document =
@@ -253,7 +253,7 @@ class MovyProvider : MainAPI() {
         sources.forEach { (url, label) ->
             try {
                 val handled = loadExtractor(url, subtitleCallback) { link ->
-                    callback(link.copy(name = label.ifBlank { link.name }))
+                    callback(link)
                     found = true
                 }
                 if (!handled) {
