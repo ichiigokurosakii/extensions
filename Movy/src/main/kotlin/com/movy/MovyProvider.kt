@@ -273,17 +273,25 @@ class MovyProvider : MainAPI() {
                     callback(link)
                     found = true
                 }
-                if (!handled && url.matches(Regex("(?i)^https?://.*\\\\.(m3u8|mp4|mpd)(?:\\\\?.*)?$"))) {
+                if (!handled) {
+                    // Resolver payloads are already direct media URLs. Some CDN
+                    // URLs are signed/extensionless, so do not discard them just
+                    // because their path lacks .m3u8 or .mp4.
+                    val linkType = when {
+                        url.contains(".mp4", true) -> ExtractorLinkType.VIDEO
+                        url.contains(".mpd", true) -> ExtractorLinkType.DASH
+                        else -> ExtractorLinkType.M3U8
+                    }
                     callback(
                         newExtractorLink(
                             source = "Movy",
                             name = label,
                             url = url,
-                            type = if (url.contains(".mp4", true)) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                            type = linkType
                         )
                     )
                     found = true
-                } else if (handled) found = true
+                } else found = true
             } catch (_: Exception) { }
         }
 
