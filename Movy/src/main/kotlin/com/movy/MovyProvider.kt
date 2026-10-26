@@ -14,14 +14,11 @@ class MovyProvider : MainAPI() {
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
-    // These routes are intentionally kept in one place so they can be adjusted if Movy changes its URLs.
+    // Keep the three confirmed catalogue routes; avoid speculative routes that can return empty pages.
     override val mainPage = listOf(
         MainPageData("Movies", "$mainUrl/browse/movie", horizontalImages = true),
         MainPageData("TV Shows", "$mainUrl/browse/show", horizontalImages = true),
-        MainPageData("Anime", "$mainUrl/browse/anime", horizontalImages = true),
-        MainPageData("Trending", "$mainUrl/browse/trending", horizontalImages = true),
-        MainPageData("Popular", "$mainUrl/browse/popular", horizontalImages = true),
-        MainPageData("Recently Added", "$mainUrl/browse/recent", horizontalImages = true)
+        MainPageData("Anime", "$mainUrl/browse/anime", horizontalImages = true)
     )
 
     private suspend fun getDocument(url: String): Document =
