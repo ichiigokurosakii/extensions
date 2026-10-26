@@ -34,19 +34,42 @@ class MovyProvider : MainAPI() {
     }
 
     private fun posterOf(element: Element, document: Document): String? {
-        val image = element.selectFirst("img")
+        // Movy uses lazy-loaded and Next.js image elements; inspect the link and
+        // a few nearby wrappers because the poster is not always inside the anchor.
+        val candidates = mutableListOf<Element>()
+        var current: Element? = element
+        repeat(5) {
+            current?.let { candidates.add(it) }
+            current = current?.parent()
+        }
+        val image = candidates.firstNotNullOfOrNull { it.selectFirst("img") }
         val raw = image?.let {
-            listOf("data-src", "data-lazy-src", "data-original", "src").firstNotNullOfOrNull { key ->
-                it.attr(key).takeIf(String::isNotBlank)
-            }
-        } ?: element.attr("data-poster")
-        return raw.takeIf(String::isNotBlank)?.let { absolute(document, it) }
+            listOf("data-src", "data-lazy-src", "data-original", "data-image", "src")
+                .firstNotNullOfOrNull { key -> it.attr(key).takeIf(String::isNotBlank) }
+                ?.takeIf { value -> !value.startsWith("data:image") }
+                ?: it.attr("srcset").split(",").firstOrNull()?.trim()?.substringBefore(" ")
+        } ?: candidates.firstNotNullOfOrNull { candidate ->
+            candidate.attr("data-poster").takeIf(String::isNotBlank)
+                ?: candidate.attr("data-image").takeIf(String::isNotBlank)
+                ?: Regex("""(?i)background-image\s*:\s*url\(['"]?([^)'"]+)""")
+                    .find(candidate.attr("style"))?.groupValues?.getOrNull(1)
+        }
+        return raw?.takeIf(String::isNotBlank)?.let { absolute(document, it) }
     }
 
-    private fun titleOf(element: Element): String =
-        element.selectFirst("h2, h3, .title, .name, .film-name, .movie-title")?.text()?.trim()
-            ?.takeIf(String::isNotBlank)
-            ?: element.attr("title").trim().ifBlank { element.text().trim() }
+    private fun titleOf(element: Element): String {
+        val local = element.selectFirst("h1, h2, h3, .title, .name, .film-name, .movie-title")
+            ?.text()?.trim()?.takeIf(String::isNotBlank)
+            ?: element.attr("title").trim().takeIf(String::isNotBlank)
+            ?: element.attr("aria-label").trim().takeIf(String::isNotBlank)
+            ?: element.selectFirst("img")?.attr("alt")?.trim()?.takeIf(String::isNotBlank)
+            ?: element.text().trim().takeIf(String::isNotBlank)
+        if (!local.isNullOrBlank()) return local
+        return element.parent()?.let { parent ->
+            parent.selectFirst("h1, h2, h3, .title, .name, .film-name, .movie-title")
+                ?.text()?.trim().orEmpty()
+        }.orEmpty()
+    }
 
     private fun isInternalContentUrl(url: String): Boolean {
         val path = try { java.net.URI(url).path.lowercase() } catch (_: Exception) { "" }
@@ -56,38 +79,25 @@ class MovyProvider : MainAPI() {
     }
 
     private fun cardElements(document: Document): List<Element> {
-        val selectors = listOf(
-            ".flw-item", ".film_list-wrap .item", ".film-poster", ".movie-item",
-            ".item.poster", ".card", "article", ".poster"
-        )
+        // Use actual content anchors as the source of truth instead of relying on
+        // old theme-specific card class names. Movy is a Next.js app and its
+        // class names can change independently of the route structure.
         val found = linkedMapOf<String, Element>()
-        selectors.forEach { selector ->
-            document.select(selector).forEach { card ->
-                val anchor = card.selectFirst("a[href]") ?: return@forEach
-                val href = anchor.absUrl("href").ifBlank { anchor.attr("href") }
-                if (isInternalContentUrl(href)) found.putIfAbsent(href.trimEnd('/'), card)
-            }
-        }
-        if (found.isEmpty()) {
-            document.select("a[href]").forEach { anchor ->
-                val href = anchor.absUrl("href").ifBlank { anchor.attr("href") }
-                if (isInternalContentUrl(href)) found.putIfAbsent(href.trimEnd('/'), anchor.parent() ?: anchor)
-            }
+        document.select("a[href]").forEach { anchor ->
+            val href = anchor.absUrl("href").ifBlank { anchor.attr("href") }
+            if (isInternalContentUrl(href)) found.putIfAbsent(href.trimEnd('/'), anchor)
         }
         return found.values.toList()
     }
 
     private fun searchResponses(document: Document): List<SearchResponse> {
         val seen = mutableSetOf<String>()
-        return cardElements(document).mapNotNull { card ->
-            val anchor = card.select("a[href]").firstOrNull { a ->
-                val href = a.absUrl("href").ifBlank { a.attr("href") }
-                isInternalContentUrl(href)
-            } ?: return@mapNotNull null
+        return cardElements(document).mapNotNull { anchor ->
             val url = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
-            val title = titleOf(card).ifBlank { titleOf(anchor) }
+            val parent = anchor.parent()
+            val title = titleOf(anchor).ifBlank { parent?.let(::titleOf).orEmpty() }
             if (title.isBlank() || url.isBlank() || !seen.add(url)) return@mapNotNull null
-            val poster = posterOf(card, document)
+            val poster = posterOf(anchor, document) ?: parent?.let { posterOf(it, document) }
             val isMovie = url.contains("/movie/")
             val isAnime = url.contains("/anime/")
             if (isMovie) newMovieSearchResponse(title, url, TvType.Movie) {
@@ -131,8 +141,14 @@ class MovyProvider : MainAPI() {
     private fun pagePoster(document: Document): String? {
         val raw = document.selectFirst("meta[property=og:image]")?.attr("content")
             ?.takeIf(String::isNotBlank)
-            ?: document.selectFirst(".film-poster img, .detail-poster img, .cover img, .poster img")
-                ?.let { listOf("data-src", "data-lazy-src", "src").firstNotNullOfOrNull { key -> it.attr(key).takeIf(String::isNotBlank) } }
+            ?: document.select("img").firstNotNullOfOrNull { image ->
+                listOf("data-src", "data-lazy-src", "data-original", "data-image", "src")
+                    .firstNotNullOfOrNull { key -> image.attr(key).takeIf(String::isNotBlank) }
+                    ?.takeIf { value ->
+                        !value.startsWith("data:image") &&
+                            (value.contains("image.tmdb.org") || value.contains("poster", true) || value.contains("wsrv.nl"))
+                    }
+            }
         return raw?.let { absolute(document, it) }
     }
 
