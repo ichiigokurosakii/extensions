@@ -5,7 +5,6 @@ import org.jsoup.nodes.Document
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.Base64
-import kotlinx.coroutines.async
 
 /**
  * Movy's player backend returns encrypted source lists from several nodes.
@@ -67,7 +66,7 @@ internal object MovyResolver {
         if (!totalSeasons.isNullOrBlank()) params["totalSeasons"] = totalSeasons
 
         val results = linkedMapOf<String, String>()
-        // Resolve nodes sequentially so this module does not require kotlinx.coroutines.
+        // Resolve nodes sequentially without an additional coroutine dependency.
         for (node in nodes) {
             try {
                 val query = params.entries.joinToString("&") {
