@@ -1,0 +1,57 @@
+name: Build CloudStream extension
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cloudstream-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.12'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build plugins and metadata
+        run: gradle make makePluginsJson
+
+      - name: Prepare repository files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p publish
+          find . -type f -name '*.cs3' -exec cp {} publish/ \;
+          test -f build/plugins.json
+          cp build/plugins.json publish/plugins.json
+          cp repo.json publish/repo.json
+          ls -la publish
+
+      - name: Publish builds branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: builds
+          publish_dir: publish
+          force_orphan: true
+          commit_message: "Build ${{ github.sha }}"
