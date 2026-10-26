@@ -5,6 +5,7 @@ import org.jsoup.nodes.Document
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.Base64
+import kotlinx.coroutines.async
 
 /**
  * Movy's player backend returns encrypted source lists from several nodes.
@@ -69,7 +70,7 @@ internal object MovyResolver {
         // Query all nodes concurrently; each successful response is independently decrypted.
         kotlinx.coroutines.coroutineScope {
             nodes.map { node ->
-                kotlinx.coroutines.async(kotlinx.coroutines.Dispatchers.IO) {
+                async(kotlinx.coroutines.Dispatchers.IO) {
                     try {
                         val query = params.entries.joinToString("&") {
                             URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
