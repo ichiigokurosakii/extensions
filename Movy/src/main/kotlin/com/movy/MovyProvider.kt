@@ -244,12 +244,36 @@ class MovyProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val document = getDocument(data)
+
+        // Movy's own backend returns encrypted multi-server source lists; resolve these first.
+        val resolved = try { MovyResolver.resolve(data, document) } catch (_: Exception) { emptyList() }
+        var found = false
+        resolved.forEach { (url, label) ->
+            try {
+                val handled = loadExtractor(url, subtitleCallback) { link ->
+                    callback(link)
+                    found = true
+                }
+                if (!handled && url.matches(Regex("(?i)^https?://.*\\\\.(m3u8|mp4|mpd)(?:\\\\?.*)?$"))) {
+                    callback(
+                        newExtractorLink(
+                            source = "Movy",
+                            name = label,
+                            url = url,
+                            type = if (url.contains(".mp4", true)) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                        )
+                    )
+                    found = true
+                } else if (handled) found = true
+            } catch (_: Exception) { }
+        }
+
+        // Fall back to ordinary embed extraction if the site backend yielded nothing.
         val sources = sourcesFrom(document, data)
         if (sources.isEmpty()) {
-            // Let CloudStream's extractor registry handle the page itself as a fallback.
+            if (found) return true
             return loadExtractor(data, subtitleCallback, callback)
         }
-        var found = false
         sources.forEach { (url, label) ->
             try {
                 val handled = loadExtractor(url, subtitleCallback) { link ->
