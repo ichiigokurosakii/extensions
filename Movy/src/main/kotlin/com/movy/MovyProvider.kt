@@ -48,7 +48,7 @@ class MovyProvider : MainAPI() {
                 .firstNotNullOfOrNull { key -> it.attr(key).takeIf(String::isNotBlank) }
                 ?.takeIf { value -> !value.startsWith("data:image") }
                 ?: it.attr("srcset").split(",").firstOrNull()?.trim()?.substringBefore(" ")
-        } ?: candidates.firstNotNullOfOrNull { candidate ->
+        }?.takeIf(String::isNotBlank) ?: candidates.firstNotNullOfOrNull { candidate ->
             candidate.attr("data-poster").takeIf(String::isNotBlank)
                 ?: candidate.attr("data-image").takeIf(String::isNotBlank)
                 ?: Regex("""(?i)background-image\s*:\s*url\(['"]?([^)'"]+)""")
@@ -58,16 +58,19 @@ class MovyProvider : MainAPI() {
     }
 
     private fun titleOf(element: Element): String {
-        val local = element.selectFirst("h1, h2, h3, .title, .name, .film-name, .movie-title")
+        val heading = element.selectFirst("h1, h2, h3, .title, .name, .film-name, .movie-title")
             ?.text()?.trim()?.takeIf(String::isNotBlank)
-            ?: element.attr("title").trim().takeIf(String::isNotBlank)
-            ?: element.attr("aria-label").trim().takeIf(String::isNotBlank)
-            ?: element.selectFirst("img")?.attr("alt")?.trim()?.takeIf(String::isNotBlank)
-            ?: element.text().trim().takeIf(String::isNotBlank)
+        val imageAlt = element.selectFirst("img")?.attr("alt")?.trim()?.takeIf(String::isNotBlank)
+        val attribute = element.attr("title").trim().ifBlank { element.attr("aria-label").trim() }
+        val text = element.text().trim()
+        val generic = setOf("play", "watch", "watch now", "more info", "more information", "image")
+        val local = sequenceOf(heading, imageAlt, attribute, text)
+            .filterNotNull()
+            .firstOrNull { it.isNotBlank() && it.lowercase() !in generic }
         if (!local.isNullOrBlank()) return local
         return element.parent()?.let { parent ->
             parent.selectFirst("h1, h2, h3, .title, .name, .film-name, .movie-title")
-                ?.text()?.trim().orEmpty()
+                ?.text()?.trim().orEmpty().ifBlank { parent.attr("title").trim() }
         }.orEmpty()
     }
 
