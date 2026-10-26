@@ -144,28 +144,39 @@ class MovyProvider : MainAPI() {
         return searchResponses(getDocument("$mainUrl/?s=$encoded"))
     }
 
-    private fun pageTitle(document: Document): String =
-        document.selectFirst("h1, .heading-name, .film-name, .movie-title, .detail-title")
-            ?.text()?.trim()?.takeIf(String::isNotBlank)
-            ?: document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
-            ?: document.title().substringBefore(" - ").trim()
+    private fun pageTitle(document: Document): String {
+        val candidates = listOf(
+            document.selectFirst("h1, .heading-name, .film-name, .movie-title, .detail-title")?.text()?.trim(),
+            document.selectFirst("meta[property=og:title]")?.attr("content")?.trim(),
+            document.title().substringBefore(" - ").trim()
+        )
+        val generic = setOf("movy", "movy watch anything", "watch anything", "watch movies online")
+        candidates.firstOrNull { !it.isNullOrBlank() && it.lowercase() !in generic }?.let { return it!! }
+        val slug = try { java.net.URI(document.location()).path.trimEnd('/').substringAfterLast('/') } catch (_: Exception) { "" }
+        return slug.replace(Regex("[-_]+"), " ").replaceFirstChar { it.uppercase() }.ifBlank { "Untitled" }
+    }
 
     private fun pagePoster(document: Document): String? {
         val meta = document.selectFirst("meta[property=og:image], meta[name=twitter:image]")
             ?.attr("content")?.takeIf(String::isNotBlank)
-        val image = document.select("img, picture source").firstNotNullOfOrNull { img ->
-            listOf("data-poster", "data-src", "data-lazy-src", "data-original", "data-image", "src")
+        val images = document.select("img, picture source").mapNotNull { img ->
+            val url = listOf("data-poster", "data-src", "data-lazy-src", "data-original", "data-image", "src")
                 .asSequence().map { img.attr(it).trim() }
                 .firstOrNull { it.isNotBlank() && !it.startsWith("data:image") && !it.startsWith("blob:") }
                 ?: listOf("data-srcset", "srcset").asSequence()
                     .map { img.attr(it).split(",").firstOrNull()?.trim()?.substringBefore(" ")?.trim().orEmpty() }
                     .firstOrNull { it.isNotBlank() && !it.startsWith("data:image") }
+            url?.let { Pair(it, (img.attr("alt") + " " + img.attr("class") + " " + it).lowercase()) }
         }
+        val preferred = images.firstOrNull { (_, hint) ->
+            hint.contains("poster") || hint.contains("tmdb") || hint.contains("image.tmdb.org") ||
+                hint.contains("_next/image") || hint.contains("cover")
+        }?.first
         val background = document.select("[style*=background-image]").firstNotNullOfOrNull { el ->
             Regex("""(?i)background-image\s*:\s*url\(['"]?([^)'"\s]+)""")
                 .find(el.attr("style"))?.groupValues?.getOrNull(1)
         }
-        return (meta ?: image ?: background)?.let { absolute(document, it) }
+        return (meta ?: preferred ?: images.firstOrNull()?.first ?: background)?.let { absolute(document, it) }
     }
 
     private fun pagePlot(document: Document): String? =
@@ -279,13 +290,9 @@ class MovyProvider : MainAPI() {
                 }
             }
         } else {
-            // A detail page without an episode list is still exposed as one playable entry.
-            listOf(newEpisode(url) {
-                name = title
-                season = 1
-                episode = 1
-                posterUrl = poster
-            })
+            // Do not fabricate a fake "Movy Watch Anything" episode when a series
+            // page's episode list has not been detected.
+            emptyList()
         }
         return newTvSeriesLoadResponse(title, url, if (url.contains("/anime/")) TvType.Anime else TvType.TvSeries, episodes) {
             posterUrl = poster
