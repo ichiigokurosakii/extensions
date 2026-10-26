@@ -1,6 +1,9 @@
 package com.movy
 
 import com.lagradost.cloudstream3.app
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -65,40 +68,48 @@ internal object MovyResolver {
             .find(html)?.groupValues?.getOrNull(1)
         if (!totalSeasons.isNullOrBlank()) params["totalSeasons"] = totalSeasons
 
-        val results = linkedMapOf<String, String>()
-        // Resolve nodes sequentially without an additional coroutine dependency.
-        for (node in nodes) {
-            try {
-                val query = params.entries.joinToString("&") {
-                    URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
-                }
-                val response = app.get("$API/$node/sources?$query", headers = headers, timeout = 12).text.trim()
-                val plain = decrypt(response, seed, tmdbId) ?: continue
-                val json = JSONObject(plain)
-                val sources = json.optJSONArray("sources")
-                if (sources != null) {
-                    for (i in 0 until sources.length()) {
-                        val item = sources.optJSONObject(i) ?: continue
-                        val url = item.optString("url").ifBlank { item.optString("file") }.trim()
-                        if (!url.startsWith("http")) continue
-                        val quality = item.optString("quality").ifBlank { "Auto" }
-                        results.putIfAbsent(url, "Movy · $quality")
-                    }
-                }
-                val audio = json.optJSONArray("audio")
-                if (audio != null) {
-                    for (i in 0 until audio.length()) {
-                        val item = audio.optJSONObject(i) ?: continue
-                        val url = item.optString("url").ifBlank { item.optString("file") }.trim()
-                        if (url.startsWith("http")) {
-                            results.putIfAbsent(url, "Movy · " + item.optString("lang", "Auto"))
+        // Query the independent source shards concurrently. Serial 12-second
+        // requests could otherwise leave playback spinning for several minutes.
+        val nodeResults = coroutineScope {
+            nodes.map { node ->
+                async {
+                    try {
+                        val query = params.entries.joinToString("&") {
+                            URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
                         }
+                        val response = app.get("$API/$node/sources?$query", headers = headers, timeout = 12).text.trim()
+                        val plain = decrypt(response, seed, tmdbId) ?: return@async emptyList<Pair<String, String>>()
+                        val json = JSONObject(plain)
+                        val found = mutableListOf<Pair<String, String>>()
+                        val sources = json.optJSONArray("sources")
+                        if (sources != null) {
+                            for (i in 0 until sources.length()) {
+                                val item = sources.optJSONObject(i) ?: continue
+                                val url = item.optString("url").ifBlank { item.optString("file") }.trim()
+                                if (!url.startsWith("http")) continue
+                                val quality = item.optString("quality").ifBlank { "Auto" }
+                                found.add(url to "Movy · $quality")
+                            }
+                        }
+                        val audio = json.optJSONArray("audio")
+                        if (audio != null) {
+                            for (i in 0 until audio.length()) {
+                                val item = audio.optJSONObject(i) ?: continue
+                                val url = item.optString("url").ifBlank { item.optString("file") }.trim()
+                                if (url.startsWith("http")) {
+                                    found.add(url to "Movy · " + item.optString("lang", "Auto"))
+                                }
+                            }
+                        }
+                        found
+                    } catch (_: Exception) {
+                        emptyList<Pair<String, String>>()
                     }
                 }
-            } catch (_: Exception) {
-                // A failed node should not prevent trying the remaining nodes.
-            }
+            }.awaitAll()
         }
+        val results = linkedMapOf<String, String>()
+        nodeResults.flatten().forEach { (url, label) -> results.putIfAbsent(url, label) }
         return results.map { it.key to it.value }
     }
 
