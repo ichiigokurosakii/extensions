@@ -117,10 +117,21 @@ class MovyProvider : MainAPI() {
             val parent = anchor.parent()
             val title = titleOf(anchor).ifBlank { parent?.let(::titleOf).orEmpty() }
             if (title.isBlank() || rawUrl.isBlank()) return@mapNotNull null
-            // Carry anime identity and catalogue title with the selected item.
-            // Detect the category from its request URL, not only its display name.
-            val url = if (isAnime && forceAnime) {
-                val marker = "csType=anime&csTitle=" + URLEncoder.encode(title, "UTF-8")
+            val cardPlot = sequenceOf(anchor, parent, parent?.parent())
+                .filterNotNull()
+                .flatMap { element ->
+                    sequenceOf(
+                        element.attr("data-overview"), element.attr("data-description"), element.attr("data-plot"),
+                        element.attr("aria-description"),
+                        element.selectFirst(".overview, .description, .synopsis")?.text().orEmpty()
+                    )
+                }
+                .map { it.trim() }
+                .firstOrNull { it.length >= 50 && it.length <= 1200 && !it.contains("Movy - Watch Free", true) }
+            // Carry anime identity, title and any real card synopsis to detail loading.
+            val url = if (isAnime) {
+                val marker = "csType=anime&csTitle=" + URLEncoder.encode(title, "UTF-8") +
+                    (cardPlot?.let { "&csPlot=" + URLEncoder.encode(it, "UTF-8") } ?: "")
                 rawUrl + (if (rawUrl.contains("?")) "&" else "?") + marker
             } else rawUrl
             if (!seen.add(url)) return@mapNotNull null
@@ -389,10 +400,11 @@ class MovyProvider : MainAPI() {
             ?.let { "https://image.tmdb.org/t/p/w500$it" }
         val poster = metadataPoster ?: pagePoster(document)
         val metadataPlot = animeInfo?.optString("overview")?.takeIf { it.isNotBlank() && it != "null" }
-        val rawPlot = pagePlot(document)
-        val plot = metadataPlot ?: rawPlot?.takeUnless {
+        val rawPlot = pagePlot(document)?.takeUnless {
             it.contains("Movy", ignoreCase = true) && it.contains("Watch Free", ignoreCase = true)
         }
+        val cataloguePlot = queryValue(url, "csPlot")?.takeIf { it.isNotBlank() && it != "null" }
+        val plot = metadataPlot ?: rawPlot ?: cataloguePlot
         val tags = document.select(".genres a, .film-genre a, a[href*='/genre/']").map { it.text().trim() }.filter(String::isNotBlank).distinct()
         val isMovie = url.contains("/movie/") || document.selectFirst("meta[property='og:type']")?.attr("content") == "video.movie"
         if (isMovie) {
