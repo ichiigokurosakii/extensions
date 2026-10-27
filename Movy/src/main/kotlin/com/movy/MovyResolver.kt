@@ -146,6 +146,13 @@ internal object MovyResolver {
     }
 
     private fun findTmdbId(pageUrl: String, html: String, doc: Document): Int? {
+        val path = try { java.net.URI(pageUrl).path.orEmpty() } catch (_: Exception) { pageUrl }
+        // Movy TV pages use /tv/{tmdbId}/{season}/{episode}; prefer that stable
+        // series ID over numeric IDs embedded in an episode's HTML.
+        Regex("^/(?:tv|show|series)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
+            .find(path)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?.takeIf { it > 0 }?.let { return it }
+
         val explicitPatterns = listOf(
             Regex("(?i)(?:tmdb[_-]?id|tmdbId|themoviedb[_-]?id)[\\\"'\\s:=]+(\\d{1,9})"),
             Regex("(?i)[?&](?:tmdbId|tmdb_id|id)=(\\d{1,9})"),
@@ -159,12 +166,23 @@ internal object MovyResolver {
                 element.attr(key).toIntOrNull()?.takeIf { it > 0 }?.let { return it }
             }
         }
-        val path = try { java.net.URI(pageUrl).path.orEmpty() } catch (_: Exception) { pageUrl }
         Regex("-(\\d{2,9})/?$").find(path)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
         return null
     }
 
     private fun findSeasonEpisode(pageUrl: String, html: String, doc: Document): Pair<Int, Int> {
+        val path = try { java.net.URI(pageUrl).path.orEmpty() } catch (_: Exception) { pageUrl }
+        // Resolve season/episode directly from Movy's numeric TV route before
+        // scanning page markup, which may contain unrelated episode numbers.
+        Regex("^/(?:tv|show|series)/\\d+/(\\d+)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
+            .find(path)?.let { match ->
+                val season = match.groupValues[1].toIntOrNull()
+                val episode = match.groupValues[2].toIntOrNull()
+                if (season != null && episode != null && season > 0 && episode > 0) {
+                    return season to episode
+                }
+            }
+
         val combined = pageUrl + " " + doc.title() + " " +
             doc.selectFirst("h1, h2, .heading-name")?.text().orEmpty() + " " + html.take(50000)
         val season = Regex("(?i)(?:season|\\bs)\\s*[-:#]?\\s*0*(\\d{1,2})")
