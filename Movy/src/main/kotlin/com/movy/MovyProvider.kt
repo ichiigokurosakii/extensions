@@ -6,6 +6,9 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.json.JSONObject
 import java.net.URLEncoder
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 class MovyProvider : MainAPI() {
     override var mainUrl = "https://www.movy.sx"
@@ -17,9 +20,9 @@ class MovyProvider : MainAPI() {
 
     // Keep the three confirmed catalogue routes; avoid speculative routes that can return empty pages.
     override val mainPage = listOf(
-        MainPageData("Movies", "$mainUrl/browse/movie", horizontalImages = true),
-        MainPageData("TV Shows", "$mainUrl/browse/tv", horizontalImages = true),
-        MainPageData("Anime", "$mainUrl/browse/anime", horizontalImages = true)
+        MainPageData("Movies", "$mainUrl/browse/movie", horizontalImages = false),
+        MainPageData("TV Shows", "$mainUrl/browse/tv", horizontalImages = false),
+        MainPageData("Anime", "$mainUrl/browse/anime", horizontalImages = false)
     )
 
     private suspend fun getDocument(url: String): Document =
@@ -103,9 +106,51 @@ class MovyProvider : MainAPI() {
         return found.values.toList()
     }
 
-    private fun searchResponses(document: Document, forceAnime: Boolean = false): List<SearchResponse> {
+    private suspend fun cataloguePoster(url: String): String? {
+        val path = try { java.net.URI(url).path.orEmpty() } catch (_: Exception) { return null }
+        val match = Regex("^/(?:[a-z]{2}/)?(movie|tv|show|series)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE).find(path)
+            ?: return null
+        val kind = if (match.groupValues[1].equals("movie", true)) "movie" else "tv"
+        val id = match.groupValues[2]
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+            "Referer" to "$mainUrl/",
+            "Accept" to "application/json, text/plain, */*"
+        )
+        return try {
+            val json = JSONObject(app.get(
+                "https://db.wecollege.net/3/$kind/$id?language=en-US",
+                headers = headers,
+                timeout = 10
+            ).text)
+            val posterPath = json.optString("poster_path").takeIf { it.isNotBlank() && it != "null" }
+            posterPath?.let { if (it.startsWith("http://") || it.startsWith("https://")) it else "https://image.tmdb.org/t/p/w500$it" }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun searchResponses(document: Document, forceAnime: Boolean = false): List<SearchResponse> {
+        val anchors = cardElements(document)
+        val posterByUrl = coroutineScope {
+            anchors.map { anchor ->
+                async {
+                    val rawUrl = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
+                    val parent = anchor.parent()
+                    val sameUrlAnchors = document.select("a[href]").filter {
+                        (it.absUrl("href").ifBlank { it.attr("href") }).trimEnd('/') == rawUrl
+                    }
+                    val domPoster = sameUrlAnchors.firstNotNullOfOrNull { posterOf(it, document) }
+                        ?: posterOf(anchor, document)
+                        ?: parent?.let { posterOf(it, document) }
+                    val path = try { java.net.URI(rawUrl).path.orEmpty() } catch (_: Exception) { "" }
+                    val isAnimePath = path.contains("/anime/", true)
+                    rawUrl to (domPoster ?: if (!isAnimePath) cataloguePoster(rawUrl) else null)
+                }
+            }.awaitAll().toMap()
+        }
         val seen = mutableSetOf<String>()
-        return cardElements(document).mapNotNull { anchor ->
+        return anchors.mapNotNull { anchor ->
             val rawUrl = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
             val isMovie = rawUrl.contains("/movie/")
             val rawPath = try { java.net.URI(rawUrl).path.orEmpty() } catch (_: Exception) { "" }
@@ -135,7 +180,7 @@ class MovyProvider : MainAPI() {
                 rawUrl + (if (rawUrl.contains("?")) "&" else "?") + marker
             } else rawUrl
             if (!seen.add(url)) return@mapNotNull null
-            val poster = posterOf(anchor, document) ?: parent?.let { posterOf(it, document) }
+            val poster = posterByUrl[rawUrl] ?: posterOf(anchor, document) ?: parent?.let { posterOf(it, document) }
             if (isMovie) newMovieSearchResponse(title, url, TvType.Movie) {
                 posterUrl = poster
             } else newTvSeriesSearchResponse(title, url, if (isAnime) TvType.Anime else TvType.TvSeries) {
@@ -155,7 +200,7 @@ class MovyProvider : MainAPI() {
         val results = searchResponses(document, forceAnime = base.contains("/browse/anime", ignoreCase = true) || request.name.equals("Anime", ignoreCase = true))
         val sectionName = request.name
         return newHomePageResponse(
-            listOf(HomePageList(sectionName, results, isHorizontalImages = true)),
+            listOf(HomePageList(sectionName, results, isHorizontalImages = false)),
             hasNext = results.isNotEmpty()
         )
     }
