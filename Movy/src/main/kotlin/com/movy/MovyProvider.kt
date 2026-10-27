@@ -113,7 +113,7 @@ class MovyProvider : MainAPI() {
             // pages. Carry the catalogue type in a harmless query marker so load()
             // can use anime metadata without changing normal TV-series behavior.
             val isAnime = !isMovie && (rawUrl.contains("/anime/") ||
-                (forceAnime && Regex("^/tv/\\d+(?:/|$)", RegexOption.IGNORE_CASE).containsMatchIn(rawPath)))
+                (forceAnime && Regex("^/(?:[a-z]{2}/)?tv/\\d+(?:/|$)", RegexOption.IGNORE_CASE).containsMatchIn(rawPath)))
             val parent = anchor.parent()
             val title = titleOf(anchor).ifBlank { parent?.let(::titleOf).orEmpty() }
             if (title.isBlank() || rawUrl.isBlank()) return@mapNotNull null
@@ -231,7 +231,7 @@ class MovyProvider : MainAPI() {
 
     private suspend fun metadataEpisodes(seriesUrl: String, poster: String?, isAnime: Boolean = false): List<com.lagradost.cloudstream3.Episode> {
         val path = try { java.net.URI(seriesUrl).path.orEmpty() } catch (_: Exception) { return emptyList() }
-        val seriesId = Regex("^/(?:tv|anime)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
+        val seriesId = Regex("^/(?:[a-z]{2}/)?(?:tv|anime)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
             .find(path)?.groupValues?.getOrNull(1) ?: return emptyList()
         val headers = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
@@ -353,7 +353,7 @@ class MovyProvider : MainAPI() {
 
     private fun isAnimeUrl(url: String): Boolean =
         queryValue(url, "csType")?.equals("anime", ignoreCase = true) == true ||
-            try { java.net.URI(url).path.orEmpty().let { it.startsWith("/anime/") || it == "/anime" } } catch (_: Exception) { false }
+            try { java.net.URI(url).path.orEmpty().let { Regex("^/(?:[a-z]{2}/)?anime(?:/|$)", RegexOption.IGNORE_CASE).containsMatchIn(it) } } catch (_: Exception) { false }
 
     private suspend fun animeMetadata(url: String): JSONObject? {
         val path = try { java.net.URI(url).path.orEmpty() } catch (_: Exception) { return null }
