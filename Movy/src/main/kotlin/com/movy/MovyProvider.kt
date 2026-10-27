@@ -366,25 +366,121 @@ class MovyProvider : MainAPI() {
         queryValue(url, "csType")?.equals("anime", ignoreCase = true) == true ||
             try { java.net.URI(url).path.orEmpty().let { Regex("^/(?:[a-z]{2}/)?anime(?:/|$)", RegexOption.IGNORE_CASE).containsMatchIn(it) } } catch (_: Exception) { false }
 
+    private fun animeSlug(url: String): String? {
+        val path = try { java.net.URI(url).path.orEmpty() } catch (_: Exception) { return null }
+        return Regex("^/(?:[a-z]{2}/)?anime/([^/]+)(?:/|$)", RegexOption.IGNORE_CASE)
+            .find(path)?.groupValues?.getOrNull(1)
+    }
+
+    private fun animeField(json: JSONObject?, vararg keys: String): String? {
+        if (json == null) return null
+        val containers = listOfNotNull(
+            json,
+            json.optJSONObject("data"),
+            json.optJSONObject("info"),
+            json.optJSONObject("anime"),
+            json.optJSONObject("details"),
+            json.optJSONObject("media")
+        )
+        for (container in containers) {
+            for (key in keys) {
+                val value = container.opt(key)
+                if (value is String && value.isNotBlank() && value != "null") return value.trim()
+                if (value is Number && value.toString().isNotBlank()) return value.toString()
+            }
+        }
+        return null
+    }
+
     private suspend fun animeMetadata(url: String): JSONObject? {
         val path = try { java.net.URI(url).path.orEmpty() } catch (_: Exception) { return null }
-        val seriesId = Regex("^/(?:[a-z]{2}/)?(?:tv|anime)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
-            .find(path)?.groupValues?.getOrNull(1) ?: return null
         val headers = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-            "Referer" to "$mainUrl/"
+            "Referer" to "$mainUrl/",
+            "Accept" to "application/json, text/plain, */*"
         )
         return try {
-            val json = JSONObject(app.get(
-                "https://db.wecollege.net/3/tv/$seriesId?language=en-US",
-                headers = headers,
-                timeout = 12
-            ).text)
-            val returnedId = json.optInt("id", 0)
-            json.takeIf { returnedId == 0 || returnedId == seriesId.toInt() }
+            val slug = animeSlug(url)
+            if (slug != null) {
+                // Anime pages use Movy's separate slug-based anime API, not the
+                // numeric TMDB-compatible TV endpoint used by regular series.
+                val raw = app.get(
+                    "https://anime.vidy.st/api/info?id=" + URLEncoder.encode(slug, "UTF-8"),
+                    headers = headers,
+                    timeout = 15
+                ).text
+                val root = JSONObject(raw)
+                root.optJSONObject("data") ?: root.optJSONObject("info") ?: root.optJSONObject("anime") ?: root
+            } else {
+                val seriesId = Regex("^/(?:[a-z]{2}/)?tv/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
+                    .find(path)?.groupValues?.getOrNull(1) ?: return null
+                val json = JSONObject(app.get(
+                    "https://db.wecollege.net/3/tv/$seriesId?language=en-US",
+                    headers = headers,
+                    timeout = 12
+                ).text)
+                val returnedId = json.optInt("id", 0)
+                json.takeIf { returnedId == 0 || returnedId == seriesId.toInt() }
+            }
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun animeEpisodesFromApi(url: String, poster: String?, info: JSONObject?): List<Episode> {
+        val slug = animeSlug(url) ?: return emptyList()
+        val root = info ?: return emptyList()
+        val arrays = mutableListOf<org.json.JSONArray>()
+        listOf(root, root.optJSONObject("data"), root.optJSONObject("info"), root.optJSONObject("anime"))
+            .filterNotNull()
+            .forEach { container ->
+                listOf("episodes", "episodeList", "episode_list", "results", "items").forEach { key ->
+                    container.optJSONArray(key)?.let { if (it.length() > 0 && it !in arrays) arrays.add(it) }
+                }
+                container.optJSONArray("seasons")?.let { seasons ->
+                    for (i in 0 until seasons.length()) {
+                        val season = seasons.optJSONObject(i) ?: continue
+                        listOf("episodes", "episodeList", "episode_list").forEach { key ->
+                            season.optJSONArray(key)?.let { if (it.length() > 0 && it !in arrays) arrays.add(it) }
+                        }
+                    }
+                }
+            }
+        val result = mutableListOf<Episode>()
+        var fallbackNumber = 0
+        for (array in arrays) {
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val number = (item.optInt("episode_number", 0).takeIf { it > 0 }
+                    ?: item.optInt("episodeNumber", 0).takeIf { it > 0 }
+                    ?: item.optInt("number", 0).takeIf { it > 0 }
+                    ?: item.optInt("episode", 0).takeIf { it > 0 }
+                    ?: (fallbackNumber + 1))
+                fallbackNumber++
+                val season = (item.optInt("season_number", 0).takeIf { it > 0 }
+                    ?: item.optInt("season", 0).takeIf { it > 0 } ?: 1)
+                val name = animeField(item, "title", "name", "episodeTitle", "episode_title")
+                    ?: "Episode $number"
+                val synopsis = animeField(item, "overview", "description", "synopsis", "plot")
+                val suppliedUrl = animeField(item, "url", "href", "link", "episodeUrl", "episode_url", "watchUrl")
+                val episodeId = animeField(item, "episodeId", "episode_id", "id", "slug")
+                val episodeUrl = when {
+                    !suppliedUrl.isNullOrBlank() && suppliedUrl.startsWith("http") -> suppliedUrl
+                    !suppliedUrl.isNullOrBlank() && suppliedUrl.startsWith("/") -> "$mainUrl$suppliedUrl"
+                    !episodeId.isNullOrBlank() -> "$mainUrl/anime/$slug?csType=anime&csAnimeEpisode=" +
+                        URLEncoder.encode(episodeId, "UTF-8") + "&csAnimeNumber=$number&csAnimeSeason=$season"
+                    else -> "$mainUrl/anime/$slug?csType=anime&csAnimeNumber=$number&csAnimeSeason=$season"
+                }
+                result.add(newEpisode(episodeUrl) {
+                    this.name = if (name.startsWith("Episode ", true)) name else "Episode $number - $name"
+                    this.season = season
+                    this.episode = number
+                    posterUrl = poster
+                    description = synopsis
+                })
+            }
+        }
+        return result.distinctBy { it.data }.sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 1 }))
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -396,10 +492,20 @@ class MovyProvider : MainAPI() {
         val title = animeInfo?.optString("name")?.takeIf { it.isNotBlank() && it != "null" }
             ?: catalogueTitle
             ?: fallbackTitle
-        val metadataPoster = animeInfo?.optString("poster_path")?.takeIf { it.isNotBlank() && it != "null" }
-            ?.let { "https://image.tmdb.org/t/p/w500$it" }
+        val posterValue = animeField(
+            animeInfo, "poster_path", "poster", "posterUrl", "poster_url",
+            "cover", "coverImage", "cover_image", "image", "imageUrl", "image_url", "thumbnail"
+        )
+        val metadataPoster = posterValue?.let { value ->
+            when {
+                value.startsWith("http://") || value.startsWith("https://") -> value
+                value.startsWith("/") && animeSlug(url) != null -> "$mainUrl$value"
+                value.startsWith("/") -> "https://image.tmdb.org/t/p/w500$value"
+                else -> value
+            }
+        }
         val poster = metadataPoster ?: pagePoster(document)
-        val metadataPlot = animeInfo?.optString("overview")?.takeIf { it.isNotBlank() && it != "null" }
+        val metadataPlot = animeField(animeInfo, "overview", "description", "synopsis", "plot", "summary")
         val rawPlot = pagePlot(document)?.takeUnless {
             it.contains("Movy", ignoreCase = true) && it.contains("Watch Free", ignoreCase = true)
         }
@@ -422,9 +528,11 @@ class MovyProvider : MainAPI() {
             Regex("^/(?:[a-z]{2}/)?(?:tv|anime)/", RegexOption.IGNORE_CASE)
                 .containsMatchIn(java.net.URI(url).path.orEmpty())
         } catch (_: Exception) { url.contains("/tv/") || url.contains("/anime/") }
-        val apiEpisodes = if (isTvRoute) {
-            metadataEpisodes(url, poster, isAnime = isAnime)
-        } else emptyList()
+        val apiEpisodes = when {
+            animeSlug(url) != null -> animeEpisodesFromApi(url, poster, animeInfo)
+            isTvRoute -> metadataEpisodes(url, poster, isAnime = isAnime)
+            else -> emptyList()
+        }
         val episodeLinks = if (apiEpisodes.isEmpty()) episodeElements(document) else emptyList()
         val episodes = if (apiEpisodes.isNotEmpty()) {
             apiEpisodes
