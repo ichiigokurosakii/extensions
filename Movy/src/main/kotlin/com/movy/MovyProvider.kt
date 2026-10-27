@@ -230,8 +230,8 @@ class MovyProvider : MainAPI() {
             val seasons = details.optJSONArray("seasons") ?: return emptyList()
             val result = mutableListOf<com.lagradost.cloudstream3.Episode>()
             for (i in 0 until seasons.length()) {
-                val season = seasons.optJSONObject(i) ?: continue
-                val seasonNumber = season.optInt("season_number", -1)
+                val seasonObject = seasons.optJSONObject(i) ?: continue
+                val seasonNumber = seasonObject.optInt("season_number", -1)
                 if (seasonNumber <= 0) continue
                 val seasonData = try {
                     JSONObject(app.get(
