@@ -357,7 +357,7 @@ class MovyProvider : MainAPI() {
 
     private suspend fun animeMetadata(url: String): JSONObject? {
         val path = try { java.net.URI(url).path.orEmpty() } catch (_: Exception) { return null }
-        val seriesId = Regex("^/(?:tv|anime)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
+        val seriesId = Regex("^/(?:[a-z]{2}/)?(?:tv|anime)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
             .find(path)?.groupValues?.getOrNull(1) ?: return null
         val headers = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
