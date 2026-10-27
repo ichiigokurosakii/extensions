@@ -343,9 +343,17 @@ class MovyProvider : MainAPI() {
         ))
     }
 
+    private fun queryValue(url: String, key: String): String? {
+        val query = try { java.net.URI(url).rawQuery.orEmpty() } catch (_: Exception) { "" }
+        return query.split("&").firstNotNullOfOrNull { part ->
+            val name = java.net.URLDecoder.decode(part.substringBefore("="), "UTF-8")
+            if (name.equals(key, ignoreCase = true)) java.net.URLDecoder.decode(part.substringAfter("=", ""), "UTF-8") else null
+        }
+    }
+
     private fun isAnimeUrl(url: String): Boolean =
-        url.contains("csType=anime", ignoreCase = true) ||
-            try { java.net.URI(url).path.orEmpty().contains("/anime/") } catch (_: Exception) { false }
+        queryValue(url, "csType")?.equals("anime", ignoreCase = true) == true ||
+            try { java.net.URI(url).path.orEmpty().let { it.startsWith("/anime/") || it == "/anime" } } catch (_: Exception) { false }
 
     private suspend fun animeMetadata(url: String): JSONObject? {
         val path = try { java.net.URI(url).path.orEmpty() } catch (_: Exception) { return null }
