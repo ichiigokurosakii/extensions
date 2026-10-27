@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import org.json.JSONObject
 import java.net.URLEncoder
 
 class MovyProvider : MainAPI() {
@@ -216,6 +217,55 @@ class MovyProvider : MainAPI() {
         return output.map { it.key to it.value }
     }
 
+    private suspend fun metadataEpisodes(seriesUrl: String, poster: String?): List<com.lagradost.cloudstream3.Episode> {
+        val path = try { java.net.URI(seriesUrl).path.orEmpty() } catch (_: Exception) { return emptyList() }
+        val seriesId = Regex("^/tv/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
+            .find(path)?.groupValues?.getOrNull(1) ?: return emptyList()
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+            "Referer" to "$mainUrl/"
+        )
+        return try {
+            val details = JSONObject(app.get("https://db.wecollege.net/3/tv/$seriesId?language=en-US", headers = headers, timeout = 12).text)
+            val seasons = details.optJSONArray("seasons") ?: return emptyList()
+            val result = mutableListOf<com.lagradost.cloudstream3.Episode>()
+            for (i in 0 until seasons.length()) {
+                val season = seasons.optJSONObject(i) ?: continue
+                val seasonNumber = season.optInt("season_number", -1)
+                if (seasonNumber <= 0) continue
+                val seasonData = try {
+                    JSONObject(app.get(
+                        "https://db.wecollege.net/3/tv/$seriesId/season/$seasonNumber?language=en-US",
+                        headers = headers,
+                        timeout = 12
+                    ).text)
+                } catch (_: Exception) {
+                    continue
+                }
+                val episodeArray = seasonData.optJSONArray("episodes") ?: continue
+                for (j in 0 until episodeArray.length()) {
+                    val episodeData = episodeArray.optJSONObject(j) ?: continue
+                    val episodeNumber = episodeData.optInt("episode_number", 0)
+                    if (episodeNumber <= 0) continue
+                    val episodeName = episodeData.optString("name").takeIf { it.isNotBlank() && it != "null" }
+                        ?: "Episode $episodeNumber"
+                    val airDate = episodeData.optString("air_date").takeIf { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) }
+                    result.add(newEpisode("$mainUrl/tv/$seriesId/$seasonNumber/$episodeNumber") {
+                        name = "S$seasonNumber E$episodeNumber - $episodeName"
+                        season = seasonNumber
+                        episode = episodeNumber
+                        posterUrl = poster
+                        description = episodeData.optString("overview").takeIf { it.isNotBlank() && it != "null" }
+                        this.date = airDate?.replace("-", "")?.toIntOrNull()
+                    })
+                }
+            }
+            result.sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 1 }))
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
     private fun numericEpisodeRoute(url: String): Triple<String, Int, Int>? {
         val path = try { java.net.URI(url).path.orEmpty() } catch (_: Exception) { return null }
         val parts = path.trim('/').split('/')
@@ -296,8 +346,16 @@ class MovyProvider : MainAPI() {
             }
         }
 
-        val episodeLinks = episodeElements(document)
-        val episodes = if (episodeLinks.isNotEmpty()) {
+        // Movy's TV detail page is a client-rendered shell; its episode links may
+        // not exist in the HTML returned to CloudStream. Build the episode list
+        // from the same TMDB-compatible metadata API used by Movy's resolver.
+        val apiEpisodes = if (url.contains("/tv/") && !url.contains("/anime/")) {
+            metadataEpisodes(url, poster)
+        } else emptyList()
+        val episodeLinks = if (apiEpisodes.isEmpty()) episodeElements(document) else emptyList()
+        val episodes = if (apiEpisodes.isNotEmpty()) {
+            apiEpisodes
+        } else if (episodeLinks.isNotEmpty()) {
             episodeLinks.mapIndexed { index, element ->
                 val href = element.absUrl("href").ifBlank { element.attr("href") }
                 val route = numericEpisodeRoute(href)
