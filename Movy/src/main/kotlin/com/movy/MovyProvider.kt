@@ -308,26 +308,28 @@ class MovyProvider : MainAPI() {
         kind: String,
         encodedQuery: String,
         headers: Map<String, String>
-    ): List<Triple<String, String, Boolean>> = try {
-        val json = JSONObject(app.get(
-            "https://db.wecollege.net/3/search/$kind?query=$encodedQuery&language=en-US",
-            headers = headers,
-            timeout = 15
-        ).text)
-        val results = json.optJSONArray("results") ?: return emptyList()
-        buildList {
-            for (i in 0 until results.length()) {
-                val item = results.optJSONObject(i) ?: continue
-                val id = item.optInt("id", 0)
-                if (id <= 0) continue
-                val title = (if (kind == "movie") item.optString("title") else item.optString("name"))
-                    .takeIf { it.isNotBlank() && it != "null" } ?: continue
-                val path = if (kind == "movie") "movie" else "tv"
-                add(Triple("$mainUrl/$path/$id", title, kind == "movie"))
+    ): List<Triple<String, String, Boolean>> {
+        return try {
+            val json = JSONObject(app.get(
+                "https://db.wecollege.net/3/search/$kind?query=$encodedQuery&language=en-US",
+                headers = headers,
+                timeout = 15
+            ).text)
+            val results = json.optJSONArray("results") ?: return emptyList()
+            buildList {
+                for (i in 0 until results.length()) {
+                    val item = results.optJSONObject(i) ?: continue
+                    val id = item.optInt("id", 0)
+                    if (id <= 0) continue
+                    val title = (if (kind == "movie") item.optString("title") else item.optString("name"))
+                        .takeIf { it.isNotBlank() && it != "null" } ?: continue
+                    val path = if (kind == "movie") "movie" else "tv"
+                    add(Triple("$mainUrl/$path/$id", title, kind == "movie"))
+                }
             }
+        } catch (_: Exception) {
+            emptyList()
         }
-    } catch (_: Exception) {
-        emptyList()
     }
 
     // Quick search shares the same metadata-backed title search.
