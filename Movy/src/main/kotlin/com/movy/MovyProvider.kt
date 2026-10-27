@@ -103,16 +103,24 @@ class MovyProvider : MainAPI() {
         return found.values.toList()
     }
 
-    private fun searchResponses(document: Document): List<SearchResponse> {
+    private fun searchResponses(document: Document, forceAnime: Boolean = false): List<SearchResponse> {
         val seen = mutableSetOf<String>()
         return cardElements(document).mapNotNull { anchor ->
-            val url = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
+            val rawUrl = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
+            val isMovie = rawUrl.contains("/movie/")
+            val rawPath = try { java.net.URI(rawUrl).path.orEmpty() } catch (_: Exception) { "" }
+            // Movy's anime catalogue points anime series to ordinary /tv/{tmdbId}
+            // pages. Carry the catalogue type in a harmless query marker so load()
+            // can use anime metadata without changing normal TV-series behavior.
+            val isAnime = !isMovie && (rawUrl.contains("/anime/") ||
+                (forceAnime && Regex("^/tv/\\d+(?:/|$)", RegexOption.IGNORE_CASE).containsMatchIn(rawPath)))
+            val url = if (isAnime && forceAnime && !rawUrl.contains("csType=anime", true)) {
+                rawUrl + (if (rawUrl.contains("?")) "&" else "?") + "csType=anime"
+            } else rawUrl
             val parent = anchor.parent()
             val title = titleOf(anchor).ifBlank { parent?.let(::titleOf).orEmpty() }
             if (title.isBlank() || url.isBlank() || !seen.add(url)) return@mapNotNull null
             val poster = posterOf(anchor, document) ?: parent?.let { posterOf(it, document) }
-            val isMovie = url.contains("/movie/")
-            val isAnime = url.contains("/anime/")
             if (isMovie) newMovieSearchResponse(title, url, TvType.Movie) {
                 posterUrl = poster
             } else newTvSeriesSearchResponse(title, url, if (isAnime) TvType.Anime else TvType.TvSeries) {
@@ -129,7 +137,7 @@ class MovyProvider : MainAPI() {
             else -> "$base?page=$page"
         }
         val document = getDocument(url)
-        val results = searchResponses(document)
+        val results = searchResponses(document, forceAnime = request.name.equals("Anime", ignoreCase = true))
         val sectionName = request.name
         return newHomePageResponse(
             listOf(HomePageList(sectionName, results, isHorizontalImages = true)),
@@ -217,7 +225,7 @@ class MovyProvider : MainAPI() {
         return output.map { it.key to it.value }
     }
 
-    private suspend fun metadataEpisodes(seriesUrl: String, poster: String?): List<com.lagradost.cloudstream3.Episode> {
+    private suspend fun metadataEpisodes(seriesUrl: String, poster: String?, isAnime: Boolean = false): List<com.lagradost.cloudstream3.Episode> {
         val path = try { java.net.URI(seriesUrl).path.orEmpty() } catch (_: Exception) { return emptyList() }
         val seriesId = Regex("^/tv/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
             .find(path)?.groupValues?.getOrNull(1) ?: return emptyList()
@@ -249,7 +257,9 @@ class MovyProvider : MainAPI() {
                     if (episodeNumber <= 0) continue
                     val episodeName = episodeData.optString("name").takeIf { it.isNotBlank() && it != "null" }
                         ?: "Episode $episodeNumber"
-                    result.add(newEpisode("$mainUrl/tv/$seriesId/$seasonNumber/$episodeNumber") {
+                    val episodeUrl = "$mainUrl/tv/$seriesId/$seasonNumber/$episodeNumber" +
+                        if (isAnime) "?csType=anime" else ""
+                    result.add(newEpisode(episodeUrl) {
                         name = "S$seasonNumber E$episodeNumber - $episodeName"
                         season = seasonNumber
                         episode = episodeNumber
@@ -329,11 +339,43 @@ class MovyProvider : MainAPI() {
         ))
     }
 
+    private fun isAnimeUrl(url: String): Boolean =
+        url.contains("csType=anime", ignoreCase = true) ||
+            try { java.net.URI(url).path.orEmpty().contains("/anime/") } catch (_: Exception) { false }
+
+    private suspend fun animeMetadata(url: String): JSONObject? {
+        val path = try { java.net.URI(url).path.orEmpty() } catch (_: Exception) { return null }
+        val seriesId = Regex("^/(?:tv|anime)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
+            .find(path)?.groupValues?.getOrNull(1) ?: return null
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+            "Referer" to "$mainUrl/"
+        )
+        return try {
+            JSONObject(app.get(
+                "https://db.wecollege.net/3/tv/$seriesId?language=en-US",
+                headers = headers,
+                timeout = 12
+            ).text).takeIf { it.optInt("id", 0) == seriesId.toInt() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     override suspend fun load(url: String): LoadResponse {
         val document = getDocument(url)
-        val title = pageTitle(document)
-        val poster = pagePoster(document)
-        val plot = pagePlot(document)
+        val isAnime = isAnimeUrl(url)
+        val animeInfo = if (isAnime) animeMetadata(url) else null
+        val fallbackTitle = pageTitle(document)
+        val title = animeInfo?.optString("name")?.takeIf { it.isNotBlank() && it != "null" } ?: fallbackTitle
+        val metadataPoster = animeInfo?.optString("poster_path")?.takeIf { it.isNotBlank() && it != "null" }
+            ?.let { "https://image.tmdb.org/t/p/w500$it" }
+        val poster = metadataPoster ?: pagePoster(document)
+        val metadataPlot = animeInfo?.optString("overview")?.takeIf { it.isNotBlank() && it != "null" }
+        val rawPlot = pagePlot(document)
+        val plot = metadataPlot ?: rawPlot?.takeUnless {
+            it.contains("Movy", ignoreCase = true) && it.contains("Watch Free", ignoreCase = true)
+        }
         val tags = document.select(".genres a, .film-genre a, a[href*='/genre/']").map { it.text().trim() }.filter(String::isNotBlank).distinct()
         val isMovie = url.contains("/movie/") || document.selectFirst("meta[property='og:type']")?.attr("content") == "video.movie"
         if (isMovie) {
@@ -348,7 +390,7 @@ class MovyProvider : MainAPI() {
         // not exist in the HTML returned to CloudStream. Build the episode list
         // from the same TMDB-compatible metadata API used by Movy's resolver.
         val apiEpisodes = if (url.contains("/tv/") && !url.contains("/anime/")) {
-            metadataEpisodes(url, poster)
+            metadataEpisodes(url, poster, isAnime = isAnime)
         } else emptyList()
         val episodeLinks = if (apiEpisodes.isEmpty()) episodeElements(document) else emptyList()
         val episodes = if (apiEpisodes.isNotEmpty()) {
@@ -382,7 +424,7 @@ class MovyProvider : MainAPI() {
             // page's episode list has not been detected.
             emptyList()
         }
-        return newTvSeriesLoadResponse(title, url, if (url.contains("/anime/")) TvType.Anime else TvType.TvSeries, episodes) {
+        return newTvSeriesLoadResponse(title, url, if (isAnime) TvType.Anime else TvType.TvSeries, episodes) {
             posterUrl = poster
             this.plot = plot
             this.tags = tags
