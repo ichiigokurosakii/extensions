@@ -275,28 +275,62 @@ class MovyProvider : MainAPI() {
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) return emptyList()
         val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+            "Referer" to "$mainUrl/",
+            "Accept" to "application/json, text/plain, */*"
+        )
 
-        // Movy's search page uses the query parameter. The old "keyword" URL was
-        // ignored by the site and returned unrelated catalogue cards.
-        val primary = searchResponses(getDocument("$mainUrl/search?query=$encoded"))
-        if (primary.isNotEmpty()) return matchingSearchResults(primary, cleanQuery)
+        // Movy's search page is client-rendered, so parsing /search as an HTML
+        // catalogue produces no titles. Use the same TMDB-compatible backend
+        // already used by the provider's working poster and episode code.
+        val movieResults = asyncSearchMetadata("movie", encoded, headers)
+        val tvResults = asyncSearchMetadata("tv", encoded, headers)
+        val combined = (movieResults + tvResults)
+            .distinctBy { it.first }
+            .take(40)
 
-        // Keep a compatibility fallback for deployments that still use the keyword parameter,
-        // but never return unrelated cards from a generic/home page.
-        val fallback = searchResponses(getDocument("$mainUrl/search?keyword=$encoded"))
-        return matchingSearchResults(fallback, cleanQuery)
-    }
-
-    private fun matchingSearchResults(results: List<SearchResponse>, query: String): List<SearchResponse> {
-        val normalizedQuery = query.lowercase().replace(Regex("[^a-z0-9]"), "")
-        if (normalizedQuery.isBlank()) return emptyList()
-        return results.filter { result ->
-            val normalizedTitle = result.name.lowercase().replace(Regex("[^a-z0-9]"), "")
-            normalizedTitle.contains(normalizedQuery)
+        return coroutineScope {
+            combined.map { (url, title, isMovie) ->
+                async {
+                    val poster = cataloguePoster(url, title, isMovie)
+                    if (isMovie) newMovieSearchResponse(title, url, TvType.Movie) {
+                        posterUrl = poster
+                    } else newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+                        posterUrl = poster
+                    }
+                }
+            }.awaitAll()
         }
     }
 
-    // Quick search shares the same Movy query endpoint and partial-title matching.
+    private suspend fun asyncSearchMetadata(
+        kind: String,
+        encodedQuery: String,
+        headers: Map<String, String>
+    ): List<Triple<String, String, Boolean>> = try {
+        val json = JSONObject(app.get(
+            "https://db.wecollege.net/3/search/$kind?query=$encodedQuery&language=en-US",
+            headers = headers,
+            timeout = 15
+        ).text)
+        val results = json.optJSONArray("results") ?: return emptyList()
+        buildList {
+            for (i in 0 until results.length()) {
+                val item = results.optJSONObject(i) ?: continue
+                val id = item.optInt("id", 0)
+                if (id <= 0) continue
+                val title = (if (kind == "movie") item.optString("title") else item.optString("name"))
+                    .takeIf { it.isNotBlank() && it != "null" } ?: continue
+                val path = if (kind == "movie") "movie" else "tv"
+                add(Triple("$mainUrl/$path/$id", title, kind == "movie"))
+            }
+        }
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    // Quick search shares the same metadata-backed title search.
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
     private fun pageTitle(document: Document): String {
