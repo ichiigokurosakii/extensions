@@ -279,6 +279,10 @@ class MovyProvider : MainAPI() {
         return searchResponses(getDocument("$mainUrl/?s=$encoded"))
     }
 
+    // Use the same Movy search endpoint and catalogue response parsing for quick search.
+    // Pass the query unchanged so partial terms such as "endg" are searched by Movy itself.
+    override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
+
     private fun pageTitle(document: Document): String {
         val candidates = listOf(
             document.selectFirst("h1, .heading-name, .film-name, .movie-title, .detail-title")?.text()?.trim(),
