@@ -364,11 +364,13 @@ class MovyProvider : MainAPI() {
             "Referer" to "$mainUrl/"
         )
         return try {
-            JSONObject(app.get(
+            val json = JSONObject(app.get(
                 "https://db.wecollege.net/3/tv/$seriesId?language=en-US",
                 headers = headers,
                 timeout = 12
-            ).text).takeIf { it.optInt("id", 0) == seriesId.toInt() }
+            ).text)
+            val returnedId = json.optInt("id", 0)
+            json.takeIf { returnedId == 0 || returnedId == seriesId.toInt() }
         } catch (_: Exception) {
             null
         }
@@ -405,7 +407,8 @@ class MovyProvider : MainAPI() {
         // not exist in the HTML returned to CloudStream. Build the episode list
         // from the same TMDB-compatible metadata API used by Movy's resolver.
         val isTvRoute = try {
-            java.net.URI(url).path.orEmpty().let { it.startsWith("/tv/") || it.startsWith("/anime/") }
+            Regex("^/(?:[a-z]{2}/)?(?:tv|anime)/", RegexOption.IGNORE_CASE)
+                .containsMatchIn(java.net.URI(url).path.orEmpty())
         } catch (_: Exception) { url.contains("/tv/") || url.contains("/anime/") }
         val apiEpisodes = if (isTvRoute) {
             metadataEpisodes(url, poster, isAnime = isAnime)
