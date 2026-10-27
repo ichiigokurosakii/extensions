@@ -1,4 +1,4 @@
-version = 4
+version = 5
 
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
