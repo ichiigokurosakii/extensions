@@ -410,7 +410,7 @@ class MovyProvider : MainAPI() {
                     timeout = 15
                 ).text
                 val root = JSONObject(raw)
-                root.optJSONObject("data") ?: root.optJSONObject("info") ?: root.optJSONObject("anime") ?: root
+                root
             } else {
                 val seriesId = Regex("^/(?:[a-z]{2}/)?tv/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
                     .find(path)?.groupValues?.getOrNull(1) ?: return null
