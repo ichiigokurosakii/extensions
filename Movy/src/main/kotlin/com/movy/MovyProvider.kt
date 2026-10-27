@@ -272,15 +272,31 @@ class MovyProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val encoded = URLEncoder.encode(query, "UTF-8")
-        val document = getDocument("$mainUrl/search?keyword=$encoded")
-        val results = searchResponses(document)
-        if (results.isNotEmpty()) return results
-        return searchResponses(getDocument("$mainUrl/?s=$encoded"))
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return emptyList()
+        val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+
+        // Movy's search page uses the query parameter. The old "keyword" URL was
+        // ignored by the site and returned unrelated catalogue cards.
+        val primary = searchResponses(getDocument("$mainUrl/search?query=$encoded"))
+        if (primary.isNotEmpty()) return matchingSearchResults(primary, cleanQuery)
+
+        // Keep a compatibility fallback for deployments that still use the keyword parameter,
+        // but never return unrelated cards from a generic/home page.
+        val fallback = searchResponses(getDocument("$mainUrl/search?keyword=$encoded"))
+        return matchingSearchResults(fallback, cleanQuery)
     }
 
-    // Use the same Movy search endpoint and catalogue response parsing for quick search.
-    // Pass the query unchanged so partial terms such as "endg" are searched by Movy itself.
+    private fun matchingSearchResults(results: List<SearchResponse>, query: String): List<SearchResponse> {
+        val normalizedQuery = query.lowercase().replace(Regex("[^a-z0-9]"), "")
+        if (normalizedQuery.isBlank()) return emptyList()
+        return results.filter { result ->
+            val normalizedTitle = result.name.lowercase().replace(Regex("[^a-z0-9]"), "")
+            normalizedTitle.contains(normalizedQuery)
+        }
+    }
+
+    // Quick search shares the same Movy query endpoint and partial-title matching.
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
     private fun pageTitle(document: Document): String {
