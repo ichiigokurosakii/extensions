@@ -106,25 +106,49 @@ class MovyProvider : MainAPI() {
         return found.values.toList()
     }
 
-    private suspend fun cataloguePoster(url: String): String? {
+    private suspend fun cataloguePoster(url: String, title: String, isMovie: Boolean): String? {
         val path = try { java.net.URI(url).path.orEmpty() } catch (_: Exception) { return null }
-        val match = Regex("^/(?:[a-z]{2}/)?(movie|tv|show|series)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE).find(path)
-            ?: return null
-        val kind = if (match.groupValues[1].equals("movie", true)) "movie" else "tv"
-        val id = match.groupValues[2]
         val headers = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
             "Referer" to "$mainUrl/",
             "Accept" to "application/json, text/plain, */*"
         )
+        fun posterUrl(json: JSONObject): String? {
+            val value = json.optString("poster_path").takeIf { it.isNotBlank() && it != "null" } ?: return null
+            return if (value.startsWith("http://") || value.startsWith("https://")) value
+                else "https://image.tmdb.org/t/p/w500$value"
+        }
         return try {
-            val json = JSONObject(app.get(
-                "https://db.wecollege.net/3/$kind/$id?language=en-US",
+            // Prefer the site's numeric metadata ID when its route provides one.
+            val route = Regex("^/(?:[a-z]{2}/)?(movie|tv|show|series)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE).find(path)
+            if (route != null) {
+                val kind = if (route.groupValues[1].equals("movie", true)) "movie" else "tv"
+                val details = try {
+                    JSONObject(app.get("https://db.wecollege.net/3/$kind/${route.groupValues[2]}?language=en-US", headers = headers, timeout = 10).text)
+                } catch (_: Exception) { JSONObject() }
+                posterUrl(details)?.let { return it }
+            }
+            // Movy cards can omit image URLs entirely. Search the metadata API by the
+            // visible card title instead of leaving the poster blank.
+            val kind = if (isMovie) "movie" else "tv"
+            val query = URLEncoder.encode(title, "UTF-8")
+            val search = JSONObject(app.get(
+                "https://db.wecollege.net/3/search/$kind?query=$query&language=en-US",
                 headers = headers,
                 timeout = 10
             ).text)
-            val posterPath = json.optString("poster_path").takeIf { it.isNotBlank() && it != "null" }
-            posterPath?.let { if (it.startsWith("http://") || it.startsWith("https://")) it else "https://image.tmdb.org/t/p/w500$it" }
+            val results = search.optJSONArray("results") ?: return null
+            val normalizedTitle = title.lowercase().replace(Regex("[^a-z0-9]"), "")
+            var fallback: JSONObject? = null
+            for (i in 0 until results.length()) {
+                val item = results.optJSONObject(i) ?: continue
+                if (fallback == null) fallback = item
+                val candidate = (item.optString("title").ifBlank {
+                    item.optString("name").ifBlank { item.optString("original_name") }
+                }).lowercase().replace(Regex("[^a-z0-9]"), "")
+                if (candidate == normalizedTitle && posterUrl(item) != null) return posterUrl(item)
+            }
+            fallback?.let(::posterUrl)
         } catch (_: Exception) {
             null
         }
@@ -145,7 +169,10 @@ class MovyProvider : MainAPI() {
                         ?: parent?.let { posterOf(it, document) }
                     val path = try { java.net.URI(rawUrl).path.orEmpty() } catch (_: Exception) { "" }
                     val isAnimePath = path.contains("/anime/", true)
-                    rawUrl to (domPoster ?: if (!isAnimePath) cataloguePoster(rawUrl) else null)
+                    val isMoviePath = path.contains("/movie/", true)
+                    val cardTitle = titleOf(anchor).ifBlank { parent?.let(::titleOf).orEmpty() }
+                    rawUrl to (domPoster ?: if (!isAnimePath && cardTitle.isNotBlank())
+                        cataloguePoster(rawUrl, cardTitle, isMoviePath) else null)
                 }
             }.awaitAll().toMap()
         }
