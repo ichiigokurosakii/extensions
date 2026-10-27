@@ -231,7 +231,7 @@ class MovyProvider : MainAPI() {
 
     private suspend fun metadataEpisodes(seriesUrl: String, poster: String?, isAnime: Boolean = false): List<com.lagradost.cloudstream3.Episode> {
         val path = try { java.net.URI(seriesUrl).path.orEmpty() } catch (_: Exception) { return emptyList() }
-        val seriesId = Regex("^/tv/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
+        val seriesId = Regex("^/(?:tv|anime)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
             .find(path)?.groupValues?.getOrNull(1) ?: return emptyList()
         val headers = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
@@ -379,7 +379,10 @@ class MovyProvider : MainAPI() {
         val isAnime = isAnimeUrl(url)
         val animeInfo = if (isAnime) animeMetadata(url) else null
         val fallbackTitle = pageTitle(document)
-        val title = animeInfo?.optString("name")?.takeIf { it.isNotBlank() && it != "null" } ?: fallbackTitle
+        val catalogueTitle = queryValue(url, "csTitle")?.takeIf { it.isNotBlank() && it != "null" }
+        val title = animeInfo?.optString("name")?.takeIf { it.isNotBlank() && it != "null" }
+            ?: catalogueTitle
+            ?: fallbackTitle
         val metadataPoster = animeInfo?.optString("poster_path")?.takeIf { it.isNotBlank() && it != "null" }
             ?.let { "https://image.tmdb.org/t/p/w500$it" }
         val poster = metadataPoster ?: pagePoster(document)
@@ -401,7 +404,10 @@ class MovyProvider : MainAPI() {
         // Movy's TV detail page is a client-rendered shell; its episode links may
         // not exist in the HTML returned to CloudStream. Build the episode list
         // from the same TMDB-compatible metadata API used by Movy's resolver.
-        val apiEpisodes = if (url.contains("/tv/") && !url.contains("/anime/")) {
+        val isTvRoute = try {
+            java.net.URI(url).path.orEmpty().let { it.startsWith("/tv/") || it.startsWith("/anime/") }
+        } catch (_: Exception) { url.contains("/tv/") || url.contains("/anime/") }
+        val apiEpisodes = if (isTvRoute) {
             metadataEpisodes(url, poster, isAnime = isAnime)
         } else emptyList()
         val episodeLinks = if (apiEpisodes.isEmpty()) episodeElements(document) else emptyList()
