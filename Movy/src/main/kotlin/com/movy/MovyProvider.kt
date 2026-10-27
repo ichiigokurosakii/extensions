@@ -240,10 +240,17 @@ class MovyProvider : MainAPI() {
         return output.map { it.key to it.value }
     }
 
-    private suspend fun metadataEpisodes(seriesUrl: String, poster: String?, isAnime: Boolean = false): List<com.lagradost.cloudstream3.Episode> {
+    private suspend fun metadataEpisodes(
+        seriesUrl: String,
+        poster: String?,
+        isAnime: Boolean = false,
+        seriesIdOverride: Int? = null
+    ): List<com.lagradost.cloudstream3.Episode> {
         val path = try { java.net.URI(seriesUrl).path.orEmpty() } catch (_: Exception) { return emptyList() }
-        val seriesId = Regex("^/(?:[a-z]{2}/)?(?:tv|anime)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
-            .find(path)?.groupValues?.getOrNull(1) ?: return emptyList()
+        val seriesId = seriesIdOverride?.takeIf { it > 0 }?.toString()
+            ?: Regex("^/(?:[a-z]{2}/)?(?:tv|anime)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
+                .find(path)?.groupValues?.getOrNull(1)
+            ?: return emptyList()
         val headers = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
             "Referer" to "$mainUrl/"
@@ -427,6 +434,47 @@ class MovyProvider : MainAPI() {
         }
     }
 
+    private suspend fun animeTmdbFallback(url: String, title: String?): JSONObject? {
+        if (animeSlug(url) == null || title.isNullOrBlank()) return null
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+            "Referer" to "$mainUrl/",
+            "Accept" to "application/json, text/plain, */*"
+        )
+        return try {
+            val query = URLEncoder.encode(title, "UTF-8")
+            val search = JSONObject(app.get(
+                "https://db.wecollege.net/3/search/tv?query=$query&language=en-US",
+                headers = headers,
+                timeout = 12
+            ).text)
+            val results = search.optJSONArray("results") ?: return null
+            if (results.length() == 0) return null
+            val normalizedTitle = title.lowercase().replace(Regex("[^a-z0-9]"), "")
+            var selectedId = 0
+            for (i in 0 until results.length()) {
+                val item = results.optJSONObject(i) ?: continue
+                val candidate = (item.optString("name").ifBlank { item.optString("original_name") })
+                    .lowercase().replace(Regex("[^a-z0-9]"), "")
+                val id = item.optInt("id", 0)
+                if (id > 0 && candidate == normalizedTitle) {
+                    selectedId = id
+                    break
+                }
+                if (selectedId == 0 && id > 0) selectedId = id
+            }
+            if (selectedId <= 0) return null
+            val details = JSONObject(app.get(
+                "https://db.wecollege.net/3/tv/$selectedId?language=en-US",
+                headers = headers,
+                timeout = 12
+            ).text)
+            details.takeIf { it.optInt("id", 0) == selectedId }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun animeEpisodesFromApi(url: String, poster: String?, info: JSONObject?): List<Episode> {
         val slug = animeSlug(url) ?: return emptyList()
         val root = info ?: return emptyList()
@@ -489,9 +537,15 @@ class MovyProvider : MainAPI() {
         val animeInfo = if (isAnime) animeMetadata(url) else null
         val fallbackTitle = pageTitle(document)
         val catalogueTitle = queryValue(url, "csTitle")?.takeIf { it.isNotBlank() && it != "null" }
-        val title = animeInfo?.optString("name")?.takeIf { it.isNotBlank() && it != "null" }
+        val title = animeField(animeInfo, "name", "title", "englishTitle", "english_title")
             ?: catalogueTitle
             ?: fallbackTitle
+        val animeNeedsTmdbFallback = isAnime && animeSlug(url) != null && (
+            animeEpisodesFromApi(url, null, animeInfo).isEmpty() ||
+                animeField(animeInfo, "poster_path", "poster", "posterUrl", "poster_url", "cover", "coverImage", "cover_image", "image", "imageUrl", "image_url", "thumbnail") == null ||
+                animeField(animeInfo, "overview", "description", "synopsis", "plot", "summary") == null
+            )
+        val animeTmdbInfo = if (animeNeedsTmdbFallback) animeTmdbFallback(url, title) else null
         val posterValue = animeField(
             animeInfo, "poster_path", "poster", "posterUrl", "poster_url",
             "cover", "coverImage", "cover_image", "image", "imageUrl", "image_url", "thumbnail"
@@ -503,9 +557,13 @@ class MovyProvider : MainAPI() {
                 value.startsWith("/") -> "https://image.tmdb.org/t/p/w500$value"
                 else -> value
             }
+        } ?: animeField(animeTmdbInfo, "poster_path")?.let { value ->
+            if (value.startsWith("http://") || value.startsWith("https://")) value
+            else "https://image.tmdb.org/t/p/w500$value"
         }
         val poster = metadataPoster ?: pagePoster(document)
         val metadataPlot = animeField(animeInfo, "overview", "description", "synopsis", "plot", "summary")
+            ?: animeField(animeTmdbInfo, "overview", "description", "synopsis", "plot")
         val rawPlot = pagePlot(document)?.takeUnless {
             it.contains("Movy", ignoreCase = true) && it.contains("Watch Free", ignoreCase = true)
         }
@@ -528,8 +586,13 @@ class MovyProvider : MainAPI() {
             Regex("^/(?:[a-z]{2}/)?(?:tv|anime)/", RegexOption.IGNORE_CASE)
                 .containsMatchIn(java.net.URI(url).path.orEmpty())
         } catch (_: Exception) { url.contains("/tv/") || url.contains("/anime/") }
+        val directAnimeEpisodes = if (animeSlug(url) != null) animeEpisodesFromApi(url, poster, animeInfo) else emptyList()
         val apiEpisodes = when {
-            animeSlug(url) != null -> animeEpisodesFromApi(url, poster, animeInfo)
+            directAnimeEpisodes.isNotEmpty() -> directAnimeEpisodes
+            animeTmdbInfo != null -> metadataEpisodes(
+                url, poster, isAnime = true,
+                seriesIdOverride = animeField(animeTmdbInfo, "id")?.toIntOrNull()
+            )
             isTvRoute -> metadataEpisodes(url, poster, isAnime = isAnime)
             else -> emptyList()
         }
