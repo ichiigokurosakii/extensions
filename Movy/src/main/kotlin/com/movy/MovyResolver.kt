@@ -149,7 +149,7 @@ internal object MovyResolver {
         val path = try { java.net.URI(pageUrl).path.orEmpty() } catch (_: Exception) { pageUrl }
         // Movy TV pages use /tv/{tmdbId}/{season}/{episode}; prefer that stable
         // series ID over numeric IDs embedded in an episode's HTML.
-        Regex("^/(?:tv|show|series|anime)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
+        Regex("^/(?:[a-z]{2}/)?(?:tv|show|series|anime)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
             .find(path)?.groupValues?.getOrNull(1)?.toIntOrNull()
             ?.takeIf { it > 0 }?.let { return it }
 
@@ -174,7 +174,7 @@ internal object MovyResolver {
         val path = try { java.net.URI(pageUrl).path.orEmpty() } catch (_: Exception) { pageUrl }
         // Resolve season/episode directly from Movy's numeric TV route before
         // scanning page markup, which may contain unrelated episode numbers.
-        Regex("^/(?:tv|show|series|anime)/\\d+/(\\d+)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
+        Regex("^/(?:[a-z]{2}/)?(?:tv|show|series|anime)/\\d+/(\\d+)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
             .find(path)?.let { match ->
                 val season = match.groupValues[1].toIntOrNull()
                 val episode = match.groupValues[2].toIntOrNull()
