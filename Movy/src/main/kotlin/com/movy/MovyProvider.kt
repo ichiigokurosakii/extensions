@@ -216,6 +216,16 @@ class MovyProvider : MainAPI() {
         return output.map { it.key to it.value }
     }
 
+    private fun numericEpisodeRoute(url: String): Triple<String, Int, Int>? {
+        val path = try { java.net.URI(url).path.orEmpty() } catch (_: Exception) { return null }
+        val parts = path.trim('/').split('/')
+        if (parts.size < 4 || parts[0].lowercase() !in setOf("tv", "show", "series")) return null
+        val id = parts[1].takeIf { it.all(Char::isDigit) } ?: return null
+        val season = parts[2].toIntOrNull()?.takeIf { it > 0 } ?: return null
+        val episode = parts[3].toIntOrNull()?.takeIf { it > 0 } ?: return null
+        return Triple(id, season, episode)
+    }
+
     private fun episodeElements(document: Document): List<Element> {
         val selectors = listOf(
             ".episodes-list a[href]", ".ss-list a[href]", ".episode-list a[href]",
@@ -225,39 +235,50 @@ class MovyProvider : MainAPI() {
             "a[href*='/episode']", "a[href*='/watch/']"
         )
         val result = linkedMapOf<String, Element>()
-        selectors.forEach { selector ->
-            document.select(selector).forEach { a ->
-                val href = a.absUrl("href").ifBlank { a.attr("href") }
-                val label = (a.text() + " " + a.attr("title") + " " + a.attr("aria-label") +
-                    " " + a.className() + " " + a.parent()?.className().orEmpty())
-                val episodeLike = Regex(
-                    "(?i)(?:/episode(?:[-_/]|$)|episode\\s*[-:#]?\\s*\\d+|\\bep\\.?\\s*\\d+|\\bs\\d{1,2}e\\d{1,3}\\b)"
-                ).containsMatchIn("$href $label") ||
-                    a.parents().take(4).any { p ->
-                        p.className().contains("episode", true) ||
-                            p.className().contains("ep-item", true) ||
-                            p.id().contains("episode", true)
-                    }
-                if (href.startsWith("http") && href.trimEnd('/') != document.location().trimEnd('/') &&
-                    episodeLike && isInternalContentUrl(href)
-                ) result.putIfAbsent(href, a)
-            }
+        fun addIfEpisode(a: Element) {
+            val href = a.absUrl("href").ifBlank { a.attr("href") }
+            val label = (a.text() + " " + a.attr("title") + " " + a.attr("aria-label") +
+                " " + a.className() + " " + a.parent()?.className().orEmpty())
+            val route = numericEpisodeRoute(href)
+            val currentPath = try { java.net.URI(document.location()).path.orEmpty().trim('/') } catch (_: Exception) { "" }
+            val currentParts = currentPath.split('/')
+            val sameSeries = route != null && currentParts.size >= 2 &&
+                currentParts[0].lowercase() in setOf("tv", "show", "series") &&
+                currentParts[1] == route.first
+            val episodeLike = sameSeries ||
+                Regex("(?i)(?:/episode(?:[-_/]|$)|episode\\s*[-:#]?\\s*\\d+|\\bep\\.?\\s*\\d+|\\bs\\d{1,2}e\\d{1,3}\\b)")
+                    .containsMatchIn("$href $label") ||
+                a.parents().take(4).any { p ->
+                    p.className().contains("episode", true) ||
+                        p.className().contains("ep-item", true) ||
+                        p.id().contains("episode", true)
+                }
+            if (href.startsWith("http") && href.trimEnd('/') != document.location().trimEnd('/') &&
+                episodeLike && isInternalContentUrl(href)
+            ) result.putIfAbsent(href.trimEnd('/'), a)
         }
-        // Some builds serialize episode URLs in Next.js state rather than ordinary anchors.
+
+        selectors.forEach { selector -> document.select(selector).forEach(::addIfEpisode) }
+        // Movy encodes TV episodes as /tv/{seriesId}/{season}/{episode}.
+        document.select("a[href]").forEach(::addIfEpisode)
+
         document.select("script#__NEXT_DATA__, script[type=application/json]").forEach { script ->
             val state = script.data().ifBlank { script.html() }
-            val pathPattern = Regex("""(?i)["']((?:https?:\\/\\/[^"']+)?/?(?:anime|tv|show|series)/[^"'\s]*(?:episode[-_/]?\d+|ep[-_/]?\d+|s\d+e\d+)[^"'\s]*)["']""")
+            val pathPattern = Regex("""(?i)["']((?:https?:\\/\\/[^"']+)?/?(?:tv|show|series)/\d+/\d+/\d+[^"'\s]*)["']""")
             pathPattern.findAll(state).forEach { match ->
                 val raw = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
                 val href = absolute(document, raw)
-                if (href.startsWith("http") && href.trimEnd('/') != document.location().trimEnd('/')) {
-                    val number = Regex("(?i)(?:episode|ep|e)[-_/ ]*0*(\\d+)").find(raw)?.groupValues?.getOrNull(1)
-                    val synthetic = Element("a").attr("href", href).text("Episode " + (number ?: (result.size + 1).toString()))
-                    result.putIfAbsent(href, synthetic)
+                val route = numericEpisodeRoute(href)
+                if (route != null) {
+                    val synthetic = Element("a").attr("href", href).text("Episode " + route.third)
+                    result.putIfAbsent(href.trimEnd('/'), synthetic)
                 }
             }
         }
-        return result.values.toList()
+        return result.values.sortedWith(compareBy<Element>(
+            { numericEpisodeRoute(it.absUrl("href").ifBlank { it.attr("href") })?.second ?: 1 },
+            { numericEpisodeRoute(it.absUrl("href").ifBlank { it.attr("href") })?.third ?: Int.MAX_VALUE }
+        ))
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -279,12 +300,23 @@ class MovyProvider : MainAPI() {
         val episodes = if (episodeLinks.isNotEmpty()) {
             episodeLinks.mapIndexed { index, element ->
                 val href = element.absUrl("href").ifBlank { element.attr("href") }
-                val label = element.text().trim().ifBlank { "Episode ${index + 1}" }
-                val episodeNumber = Regex("(?i)(?:episode|ep|e)\\s*0*(\\d+)").find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                val route = numericEpisodeRoute(href)
+                val textLabel = element.text().trim()
+                val label = when {
+                    textLabel.isBlank() -> "Episode ${route?.third ?: index + 1}"
+                    textLabel.length > 100 -> textLabel.take(100)
+                    textLabel.equals("play", true) || textLabel.equals("watch", true) ->
+                        "Episode ${route?.third ?: index + 1}"
+                    else -> textLabel
+                }
+                val episodeNumber = route?.third
+                    ?: Regex("(?i)(?:episode|ep|e)\\s*0*(\\d+)").find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
                     ?: (index + 1)
                 newEpisode(href) {
                     name = label
-                    season = Regex("(?i)(?:season|s)\\s*0*(\\d+)").find(label)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+                    season = route?.second
+                        ?: Regex("(?i)(?:season|s)\\s*0*(\\d+)").find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                        ?: 1
                     episode = episodeNumber
                     posterUrl = poster
                 }
