@@ -114,12 +114,16 @@ class MovyProvider : MainAPI() {
             // can use anime metadata without changing normal TV-series behavior.
             val isAnime = !isMovie && (rawUrl.contains("/anime/") ||
                 (forceAnime && Regex("^/tv/\\d+(?:/|$)", RegexOption.IGNORE_CASE).containsMatchIn(rawPath)))
-            val url = if (isAnime && forceAnime && !rawUrl.contains("csType=anime", true)) {
-                rawUrl + (if (rawUrl.contains("?")) "&" else "?") + "csType=anime"
-            } else rawUrl
             val parent = anchor.parent()
             val title = titleOf(anchor).ifBlank { parent?.let(::titleOf).orEmpty() }
-            if (title.isBlank() || url.isBlank() || !seen.add(url)) return@mapNotNull null
+            if (title.isBlank() || rawUrl.isBlank()) return@mapNotNull null
+            // Carry anime identity and catalogue title with the selected item.
+            // Detect the category from its request URL, not only its display name.
+            val url = if (isAnime && forceAnime) {
+                val marker = "csType=anime&csTitle=" + URLEncoder.encode(title, "UTF-8")
+                rawUrl + (if (rawUrl.contains("?")) "&" else "?") + marker
+            } else rawUrl
+            if (!seen.add(url)) return@mapNotNull null
             val poster = posterOf(anchor, document) ?: parent?.let { posterOf(it, document) }
             if (isMovie) newMovieSearchResponse(title, url, TvType.Movie) {
                 posterUrl = poster
