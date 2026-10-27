@@ -540,12 +540,9 @@ class MovyProvider : MainAPI() {
         val title = animeField(animeInfo, "name", "title", "englishTitle", "english_title")
             ?: catalogueTitle
             ?: fallbackTitle
-        val animeNeedsTmdbFallback = isAnime && animeSlug(url) != null && (
-            animeEpisodesFromApi(url, null, animeInfo).isEmpty() ||
-                animeField(animeInfo, "poster_path", "poster", "posterUrl", "poster_url", "cover", "coverImage", "cover_image", "image", "imageUrl", "image_url", "thumbnail") == null ||
-                animeField(animeInfo, "overview", "description", "synopsis", "plot", "summary") == null
-            )
-        val animeTmdbInfo = if (animeNeedsTmdbFallback) animeTmdbFallback(url, title) else null
+        // Use a numeric TMDB-compatible episode route whenever possible so the
+        // existing, proven Movy resolver can handle anime playback as well.
+        val animeTmdbInfo = if (isAnime && animeSlug(url) != null) animeTmdbFallback(url, title) else null
         val posterValue = animeField(
             animeInfo, "poster_path", "poster", "posterUrl", "poster_url",
             "cover", "coverImage", "cover_image", "image", "imageUrl", "image_url", "thumbnail"
@@ -588,11 +585,11 @@ class MovyProvider : MainAPI() {
         } catch (_: Exception) { url.contains("/tv/") || url.contains("/anime/") }
         val directAnimeEpisodes = if (animeSlug(url) != null) animeEpisodesFromApi(url, poster, animeInfo) else emptyList()
         val apiEpisodes = when {
-            directAnimeEpisodes.isNotEmpty() -> directAnimeEpisodes
             animeTmdbInfo != null -> metadataEpisodes(
                 url, poster, isAnime = true,
                 seriesIdOverride = animeField(animeTmdbInfo, "id")?.toIntOrNull()
-            )
+            ).ifEmpty { directAnimeEpisodes }
+            directAnimeEpisodes.isNotEmpty() -> directAnimeEpisodes
             isTvRoute -> metadataEpisodes(url, poster, isAnime = isAnime)
             else -> emptyList()
         }
