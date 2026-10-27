@@ -137,7 +137,7 @@ class MovyProvider : MainAPI() {
             else -> "$base?page=$page"
         }
         val document = getDocument(url)
-        val results = searchResponses(document, forceAnime = request.name.equals("Anime", ignoreCase = true))
+        val results = searchResponses(document, forceAnime = base.contains("/browse/anime", ignoreCase = true) || request.name.equals("Anime", ignoreCase = true))
         val sectionName = request.name
         return newHomePageResponse(
             listOf(HomePageList(sectionName, results, isHorizontalImages = true)),
