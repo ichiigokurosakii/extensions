@@ -543,15 +543,18 @@ class MovyProvider : MainAPI() {
         // Use a numeric TMDB-compatible episode route whenever possible so the
         // existing, proven Movy resolver can handle anime playback as well.
         val animeTmdbInfo = if (isAnime && animeSlug(url) != null) animeTmdbFallback(url, title) else null
+        val tmdbPosterPath = animeField(animeInfo, "poster_path")
         val posterValue = animeField(
-            animeInfo, "poster_path", "poster", "posterUrl", "poster_url",
+            animeInfo, "poster", "posterUrl", "poster_url",
             "cover", "coverImage", "cover_image", "image", "imageUrl", "image_url", "thumbnail"
         )
-        val metadataPoster = posterValue?.let { value ->
+        val metadataPoster = tmdbPosterPath?.let { value ->
+            if (value.startsWith("http://") || value.startsWith("https://")) value
+            else "https://image.tmdb.org/t/p/w500$value"
+        } ?: posterValue?.let { value ->
             when {
                 value.startsWith("http://") || value.startsWith("https://") -> value
-                value.startsWith("/") && animeSlug(url) != null -> "$mainUrl$value"
-                value.startsWith("/") -> "https://image.tmdb.org/t/p/w500$value"
+                value.startsWith("/") -> "$mainUrl$value"
                 else -> value
             }
         } ?: animeField(animeTmdbInfo, "poster_path")?.let { value ->
