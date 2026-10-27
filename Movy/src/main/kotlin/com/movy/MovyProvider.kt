@@ -107,46 +107,78 @@ class MovyProvider : MainAPI() {
     }
 
     private suspend fun cataloguePoster(url: String, title: String, isMovie: Boolean): String? {
-        val path = try { java.net.URI(url).path.orEmpty() } catch (_: Exception) { return null }
+        val path = try { java.net.URI(url).path.orEmpty() } catch (_: Exception) { "" }
         val headers = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
             "Referer" to "$mainUrl/",
             "Accept" to "application/json, text/plain, */*"
         )
+
+        // Use the same tolerant metadata-field handling as the working anime
+        // poster path: the metadata service does not always use poster_path.
         fun posterUrl(json: JSONObject): String? {
-            val value = json.optString("poster_path").takeIf { it.isNotBlank() && it != "null" } ?: return null
-            return if (value.startsWith("http://") || value.startsWith("https://")) value
-                else "https://image.tmdb.org/t/p/w500$value"
+            val tmdbPath = animeField(json, "poster_path")
+            if (!tmdbPath.isNullOrBlank()) {
+                return if (tmdbPath.startsWith("http://") || tmdbPath.startsWith("https://")) tmdbPath
+                    else "https://image.tmdb.org/t/p/w500$tmdbPath"
+            }
+            val value = animeField(
+                json, "poster", "posterUrl", "poster_url",
+                "cover", "coverImage", "cover_image", "image", "imageUrl", "image_url", "thumbnail"
+            ) ?: return null
+            return when {
+                value.startsWith("http://") || value.startsWith("https://") -> value
+                value.startsWith("//") -> "https:$value"
+                value.startsWith("/") -> "$mainUrl$value"
+                else -> value
+            }
         }
+
         return try {
-            // Prefer the site's numeric metadata ID when its route provides one.
-            val route = Regex("^/(?:[a-z]{2}/)?(movie|tv|show|series)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE).find(path)
+            // Prefer a numeric ID already present in the Movy route.
+            val route = Regex(
+                "^/(?:[a-z]{2}/)?(movie|tv|show|series)/(\\d+)(?:/|$)",
+                RegexOption.IGNORE_CASE
+            ).find(path)
             if (route != null) {
                 val kind = if (route.groupValues[1].equals("movie", true)) "movie" else "tv"
                 val details = try {
-                    JSONObject(app.get("https://db.wecollege.net/3/$kind/${route.groupValues[2]}?language=en-US", headers = headers, timeout = 10).text)
-                } catch (_: Exception) { JSONObject() }
-                posterUrl(details)?.let { return it }
+                    JSONObject(app.get(
+                        "https://db.wecollege.net/3/$kind/${route.groupValues[2]}?language=en-US",
+                        headers = headers,
+                        timeout = 12
+                    ).text)
+                } catch (_: Exception) { null }
+                details?.let(::posterUrl)?.let { return it }
             }
-            // Movy cards can omit image URLs entirely. Search the metadata API by the
-            // visible card title instead of leaving the poster blank.
+
+            // If the route has no usable metadata poster, search by the visible title.
             val kind = if (isMovie) "movie" else "tv"
-            val query = URLEncoder.encode(title, "UTF-8")
+            val query = URLEncoder.encode(title.trim(), "UTF-8")
             val search = JSONObject(app.get(
                 "https://db.wecollege.net/3/search/$kind?query=$query&language=en-US",
                 headers = headers,
-                timeout = 10
+                timeout = 12
             ).text)
             val results = search.optJSONArray("results") ?: return null
             val normalizedTitle = title.lowercase().replace(Regex("[^a-z0-9]"), "")
+            val normalizedWithoutYear = normalizedTitle.replace(Regex("(19|20)\\d{2}$"), "")
             var fallback: JSONObject? = null
             for (i in 0 until results.length()) {
                 val item = results.optJSONObject(i) ?: continue
-                if (fallback == null) fallback = item
-                val candidate = (item.optString("title").ifBlank {
-                    item.optString("name").ifBlank { item.optString("original_name") }
-                }).lowercase().replace(Regex("[^a-z0-9]"), "")
-                if (candidate == normalizedTitle && posterUrl(item) != null) return posterUrl(item)
+                if (fallback == null && posterUrl(item) != null) fallback = item
+                val candidateTitles = listOf(
+                    item.optString("title"),
+                    item.optString("name"),
+                    item.optString("original_title"),
+                    item.optString("original_name")
+                ).filter { it.isNotBlank() && it != "null" }
+                val matches = candidateTitles.any { candidate ->
+                    val normalized = candidate.lowercase().replace(Regex("[^a-z0-9]"), "")
+                    normalized == normalizedTitle || normalized == normalizedWithoutYear ||
+                        normalized.replace(Regex("(19|20)\\d{2}$"), "") == normalizedWithoutYear
+                }
+                if (matches) posterUrl(item)?.let { return it }
             }
             fallback?.let(::posterUrl)
         } catch (_: Exception) {
