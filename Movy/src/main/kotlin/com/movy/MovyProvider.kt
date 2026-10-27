@@ -710,12 +710,17 @@ class MovyProvider : MainAPI() {
         // Use a numeric TMDB-compatible episode route whenever possible so the
         // existing, proven Movy resolver can handle anime playback as well.
         val animeTmdbInfo = if (isAnime && animeSlug(url) != null) animeTmdbFallback(url, title) else null
+        val isMovie = url.contains("/movie/") || document.selectFirst("meta[property='og:type']")?.attr("content") == "video.movie"
+
+        // Anime already has its own working metadata poster path. For regular movies
+        // and TV, resolve the poster from the numeric TMDB-compatible route first,
+        // then search by title inside cataloguePoster(), and only then inspect HTML.
         val tmdbPosterPath = animeField(animeInfo, "poster_path")
         val posterValue = animeField(
             animeInfo, "poster", "posterUrl", "poster_url",
             "cover", "coverImage", "cover_image", "image", "imageUrl", "image_url", "thumbnail"
         )
-        val metadataPoster = tmdbPosterPath?.let { value ->
+        val animeMetadataPoster = tmdbPosterPath?.let { value ->
             if (value.startsWith("http://") || value.startsWith("https://")) value
             else "https://image.tmdb.org/t/p/w500$value"
         } ?: posterValue?.let { value ->
@@ -728,7 +733,11 @@ class MovyProvider : MainAPI() {
             if (value.startsWith("http://") || value.startsWith("https://")) value
             else "https://image.tmdb.org/t/p/w500$value"
         }
-        val poster = metadataPoster ?: pagePoster(document)
+        val poster = if (isAnime) {
+            animeMetadataPoster ?: pagePoster(document)
+        } else {
+            cataloguePoster(url, title, isMovie) ?: pagePoster(document)
+        }
         val metadataPlot = animeField(animeInfo, "overview", "description", "synopsis", "plot", "summary")
             ?: animeField(animeTmdbInfo, "overview", "description", "synopsis", "plot")
         val rawPlot = pagePlot(document)?.takeUnless {
@@ -737,10 +746,10 @@ class MovyProvider : MainAPI() {
         val cataloguePlot = queryValue(url, "csPlot")?.takeIf { it.isNotBlank() && it != "null" }
         val plot = metadataPlot ?: rawPlot ?: cataloguePlot
         val tags = document.select(".genres a, .film-genre a, a[href*='/genre/']").map { it.text().trim() }.filter(String::isNotBlank).distinct()
-        val isMovie = url.contains("/movie/") || document.selectFirst("meta[property='og:type']")?.attr("content") == "video.movie"
         if (isMovie) {
             return newMovieLoadResponse(title, url, TvType.Movie, url) {
                 posterUrl = poster
+                backgroundPosterUrl = poster
                 this.plot = plot
                 this.tags = tags
             }
@@ -797,6 +806,7 @@ class MovyProvider : MainAPI() {
         }
         return newTvSeriesLoadResponse(title, url, if (isAnime) TvType.Anime else TvType.TvSeries, episodes) {
             posterUrl = poster
+            backgroundPosterUrl = poster
             this.plot = plot
             this.tags = tags
         }
