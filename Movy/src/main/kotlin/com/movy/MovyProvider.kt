@@ -249,14 +249,12 @@ class MovyProvider : MainAPI() {
                     if (episodeNumber <= 0) continue
                     val episodeName = episodeData.optString("name").takeIf { it.isNotBlank() && it != "null" }
                         ?: "Episode $episodeNumber"
-                    val airDate = episodeData.optString("air_date").takeIf { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) }
                     result.add(newEpisode("$mainUrl/tv/$seriesId/$seasonNumber/$episodeNumber") {
                         name = "S$seasonNumber E$episodeNumber - $episodeName"
                         season = seasonNumber
                         episode = episodeNumber
                         posterUrl = poster
                         description = episodeData.optString("overview").takeIf { it.isNotBlank() && it != "null" }
-                        this.date = airDate?.replace("-", "")?.toIntOrNull()
                     })
                 }
             }
