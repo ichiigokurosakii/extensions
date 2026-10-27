@@ -203,8 +203,15 @@ class MovyProvider : MainAPI() {
                     val isAnimePath = path.contains("/anime/", true)
                     val isMoviePath = path.contains("/movie/", true)
                     val cardTitle = titleOf(anchor).ifBlank { parent?.let(::titleOf).orEmpty() }
-                    rawUrl to (domPoster ?: if (!isAnimePath && cardTitle.isNotBlank())
-                        cataloguePoster(rawUrl, cardTitle, isMoviePath) else null)
+                    // Metadata must be tried before the site's DOM image for movies/TV:
+                    // the DOM helper can find a non-poster/lazy placeholder URL that CloudStream
+                    // cannot display. Keep the working anime DOM poster path unchanged.
+                    val poster = if (!isAnimePath && cardTitle.isNotBlank()) {
+                        cataloguePoster(rawUrl, cardTitle, isMoviePath) ?: domPoster
+                    } else {
+                        domPoster
+                    }
+                    rawUrl to poster
                 }
             }.awaitAll().toMap()
         }
