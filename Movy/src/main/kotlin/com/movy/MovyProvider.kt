@@ -69,7 +69,7 @@ class MovyProvider : MainAPI() {
             wrapper.select("img, picture source").firstNotNullOfOrNull(::imageUrl)?.let { return it }
             // Background posters are common in the current React/Next.js layout.
             wrapper.select("[style*=background-image]").forEach { styled ->
-                val value = Regex("""(?i)background-image\\s*:\\s*url\\(['"]?([^)'"]+)""")
+                val value = Regex("""(?i)background-image\s*:\s*url\(['"]?([^)'"]+)""")
                     .find(styled.attr("style"))?.groupValues?.getOrNull(1)
                 usable(value.orEmpty())?.let { return it }
             }
