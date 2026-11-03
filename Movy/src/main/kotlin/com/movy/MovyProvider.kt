@@ -146,7 +146,7 @@ class MovyProvider : MainAPI() {
                     JSONObject(app.get(
                         "https://db.wecollege.net/3/$kind/${route.groupValues[2]}?language=en-US",
                         headers = headers,
-                        timeout = 12
+                        timeout = 8
                     ).text)
                 } catch (_: Exception) { null }
                 details?.let(::posterUrl)?.let { return it }
@@ -158,7 +158,7 @@ class MovyProvider : MainAPI() {
             val search = JSONObject(app.get(
                 "https://db.wecollege.net/3/search/$kind?query=$query&language=en-US",
                 headers = headers,
-                timeout = 12
+                timeout = 8
             ).text)
             val results = search.optJSONArray("results") ?: return null
             val normalizedTitle = title.lowercase().replace(Regex("[^a-z0-9]"), "")
@@ -188,13 +188,32 @@ class MovyProvider : MainAPI() {
 
     private suspend fun searchResponses(document: Document, forceAnime: Boolean = false): List<SearchResponse> {
         val anchors = cardElements(document)
-        // Catalogue rendering must not issue one metadata HTTP request per card.
-        // Read poster URLs already embedded in the catalogue HTML; this keeps page
-        // loading to a single site request instead of N+1 external requests.
-        val posterByUrl = anchors.associate { anchor ->
-            val rawUrl = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
-            val parent = anchor.parent()
-            rawUrl to (posterOf(anchor, document) ?: parent?.let { posterOf(it, document) })
+        val posterByUrl = coroutineScope {
+            anchors.map { anchor ->
+                async {
+                    val rawUrl = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
+                    val parent = anchor.parent()
+                    val sameUrlAnchors = document.select("a[href]").filter {
+                        (it.absUrl("href").ifBlank { it.attr("href") }).trimEnd('/') == rawUrl
+                    }
+                    val domPoster = sameUrlAnchors.firstNotNullOfOrNull { posterOf(it, document) }
+                        ?: posterOf(anchor, document)
+                        ?: parent?.let { posterOf(it, document) }
+                    val path = try { java.net.URI(rawUrl).path.orEmpty() } catch (_: Exception) { "" }
+                    val isAnimePath = path.contains("/anime/", true)
+                    val isMoviePath = path.contains("/movie/", true)
+                    val cardTitle = titleOf(anchor).ifBlank { parent?.let(::titleOf).orEmpty() }
+                    // Metadata must be tried before the site's DOM image for movies/TV:
+                    // the DOM helper can find a non-poster/lazy placeholder URL that CloudStream
+                    // cannot display. Keep the working anime DOM poster path unchanged.
+                    val poster = if (!isAnimePath && cardTitle.isNotBlank()) {
+                        cataloguePoster(rawUrl, cardTitle, isMoviePath) ?: domPoster
+                    } else {
+                        domPoster
+                    }
+                    rawUrl to poster
+                }
+            }.awaitAll().toMap()
         }
         val seen = mutableSetOf<String>()
         return anchors.mapNotNull { anchor ->
@@ -271,12 +290,17 @@ class MovyProvider : MainAPI() {
             .distinctBy { it.first }
             .take(40)
 
-        // Search results already come from the metadata API. Avoid a second
-        // detail lookup for every result; posters are populated by catalogue HTML
-        // where available and search remains responsive on slow metadata servers.
-        return combined.map { (url, title, isMovie) ->
-            if (isMovie) newMovieSearchResponse(title, url, TvType.Movie)
-            else newTvSeriesSearchResponse(title, url, TvType.TvSeries)
+        return coroutineScope {
+            combined.map { (url, title, isMovie) ->
+                async {
+                    val poster = cataloguePoster(url, title, isMovie)
+                    if (isMovie) newMovieSearchResponse(title, url, TvType.Movie) {
+                        posterUrl = poster
+                    } else newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+                        posterUrl = poster
+                    }
+                }
+            }.awaitAll()
         }
     }
 
@@ -289,7 +313,7 @@ class MovyProvider : MainAPI() {
             val json = JSONObject(app.get(
                 "https://db.wecollege.net/3/search/$kind?query=$encodedQuery&language=en-US",
                 headers = headers,
-                timeout = 15
+                timeout = 10
             ).text)
             val results = json.optJSONArray("results") ?: return emptyList()
             buildList {
@@ -410,7 +434,7 @@ class MovyProvider : MainAPI() {
                     JSONObject(app.get(
                         "https://db.wecollege.net/3/tv/$seriesId/season/$seasonNumber?language=en-US",
                         headers = headers,
-                        timeout = 12
+                        timeout = 8
                     ).text)
                 } catch (_: Exception) {
                     continue
@@ -589,7 +613,7 @@ class MovyProvider : MainAPI() {
             val search = JSONObject(app.get(
                 "https://db.wecollege.net/3/search/tv?query=$query&language=en-US",
                 headers = headers,
-                timeout = 12
+                timeout = 8
             ).text)
             val results = search.optJSONArray("results") ?: return null
             if (results.length() == 0) return null
@@ -610,7 +634,7 @@ class MovyProvider : MainAPI() {
             val details = JSONObject(app.get(
                 "https://db.wecollege.net/3/tv/$selectedId?language=en-US",
                 headers = headers,
-                timeout = 12
+                timeout = 8
             ).text)
             details.takeIf { it.optInt("id", 0) == selectedId }
         } catch (_: Exception) {
