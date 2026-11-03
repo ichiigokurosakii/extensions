@@ -26,7 +26,7 @@ class MovyProvider : MainAPI() {
     )
 
     private suspend fun getDocument(url: String): Document =
-        app.get(url, timeout = 12).document
+        app.get(url, timeout = 8).document
 
     private fun absolute(document: Document, raw: String): String {
         if (raw.isBlank()) return ""
