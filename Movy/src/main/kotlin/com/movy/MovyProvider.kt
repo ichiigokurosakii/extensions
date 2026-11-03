@@ -26,7 +26,7 @@ class MovyProvider : MainAPI() {
     )
 
     private suspend fun getDocument(url: String): Document =
-        app.get(url, timeout = 25).document
+        app.get(url, timeout = 12).document
 
     private fun absolute(document: Document, raw: String): String {
         if (raw.isBlank()) return ""
@@ -188,32 +188,13 @@ class MovyProvider : MainAPI() {
 
     private suspend fun searchResponses(document: Document, forceAnime: Boolean = false): List<SearchResponse> {
         val anchors = cardElements(document)
-        val posterByUrl = coroutineScope {
-            anchors.map { anchor ->
-                async {
-                    val rawUrl = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
-                    val parent = anchor.parent()
-                    val sameUrlAnchors = document.select("a[href]").filter {
-                        (it.absUrl("href").ifBlank { it.attr("href") }).trimEnd('/') == rawUrl
-                    }
-                    val domPoster = sameUrlAnchors.firstNotNullOfOrNull { posterOf(it, document) }
-                        ?: posterOf(anchor, document)
-                        ?: parent?.let { posterOf(it, document) }
-                    val path = try { java.net.URI(rawUrl).path.orEmpty() } catch (_: Exception) { "" }
-                    val isAnimePath = path.contains("/anime/", true)
-                    val isMoviePath = path.contains("/movie/", true)
-                    val cardTitle = titleOf(anchor).ifBlank { parent?.let(::titleOf).orEmpty() }
-                    // Metadata must be tried before the site's DOM image for movies/TV:
-                    // the DOM helper can find a non-poster/lazy placeholder URL that CloudStream
-                    // cannot display. Keep the working anime DOM poster path unchanged.
-                    val poster = if (!isAnimePath && cardTitle.isNotBlank()) {
-                        cataloguePoster(rawUrl, cardTitle, isMoviePath) ?: domPoster
-                    } else {
-                        domPoster
-                    }
-                    rawUrl to poster
-                }
-            }.awaitAll().toMap()
+        // Catalogue rendering must not issue one metadata HTTP request per card.
+        // Read poster URLs already embedded in the catalogue HTML; this keeps page
+        // loading to a single site request instead of N+1 external requests.
+        val posterByUrl = anchors.associate { anchor ->
+            val rawUrl = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
+            val parent = anchor.parent()
+            rawUrl to (posterOf(anchor, document) ?: parent?.let { posterOf(it, document) })
         }
         val seen = mutableSetOf<String>()
         return anchors.mapNotNull { anchor ->
@@ -290,17 +271,12 @@ class MovyProvider : MainAPI() {
             .distinctBy { it.first }
             .take(40)
 
-        return coroutineScope {
-            combined.map { (url, title, isMovie) ->
-                async {
-                    val poster = cataloguePoster(url, title, isMovie)
-                    if (isMovie) newMovieSearchResponse(title, url, TvType.Movie) {
-                        posterUrl = poster
-                    } else newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
-                        posterUrl = poster
-                    }
-                }
-            }.awaitAll()
+        // Search results already come from the metadata API. Avoid a second
+        // detail lookup for every result; posters are populated by catalogue HTML
+        // where available and search remains responsive on slow metadata servers.
+        return combined.map { (url, title, isMovie) ->
+            if (isMovie) newMovieSearchResponse(title, url, TvType.Movie)
+            else newTvSeriesSearchResponse(title, url, TvType.TvSeries)
         }
     }
 
