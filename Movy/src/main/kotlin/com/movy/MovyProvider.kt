@@ -35,33 +35,49 @@ class MovyProvider : MainAPI() {
     }
 
     private fun posterOf(element: Element, document: Document): String? {
-        // Posters can be lazy-loaded or wrapped by Next.js image optimization.
+        // Search the linked card and its nearby wrappers. Next.js cards may put
+        // the image on a nested div as a CSS background rather than an <img>.
         val candidates = mutableListOf<Element>()
         var current: Element? = element
-        repeat(6) {
+        repeat(9) {
             current?.let { candidates.add(it) }
             current = current?.parent()
         }
+
+        fun usable(value: String): String? {
+            val raw = value.trim().substringBefore("  ")
+            if (raw.isBlank() || raw.startsWith("data:image") || raw.startsWith("blob:") ||
+                raw.startsWith("javascript:")) return null
+            return absolute(document, raw)
+        }
+
         fun imageUrl(img: Element): String? {
-            listOf("data-poster", "data-src", "data-lazy-src", "data-original", "data-image", "src").forEach { key ->
-                val value = img.attr(key).trim()
-                if (value.isNotBlank() && !value.startsWith("data:image") && !value.startsWith("blob:")) return value
+            listOf("data-poster", "data-src", "data-lazy-src", "data-original",
+                "data-image", "data-img", "data-lazy", "src").forEach { key ->
+                usable(img.attr(key))?.let { return it }
             }
             listOf("data-srcset", "srcset").forEach { key ->
-                val value = img.attr(key).split(",").firstOrNull()?.trim()?.substringBefore(" ")?.trim().orEmpty()
-                if (value.isNotBlank() && !value.startsWith("data:image")) return value
+                val candidatesInSet = img.attr(key).split(",").map {
+                    it.trim().substringBeforeLast(" ").trim()
+                }
+                candidatesInSet.lastOrNull { it.isNotBlank() }?.let { usable(it)?.let { url -> return url } }
             }
             return null
         }
-        val raw = candidates.firstNotNullOfOrNull { wrapper ->
-            wrapper.select("img, picture source").firstNotNullOfOrNull(::imageUrl)
-                ?: wrapper.attr("data-poster").takeIf(String::isNotBlank)
-                ?: wrapper.attr("data-image").takeIf(String::isNotBlank)
-                ?: wrapper.attr("data-src").takeIf(String::isNotBlank)
-                ?: Regex("""(?i)background-image\s*:\s*url\(['"]?([^)'"\s]+)""")
-                    .find(wrapper.attr("style"))?.groupValues?.getOrNull(1)
+
+        for (wrapper in candidates) {
+            wrapper.select("img, picture source").firstNotNullOfOrNull(::imageUrl)?.let { return it }
+            // Background posters are common in the current React/Next.js layout.
+            wrapper.select("[style*=background-image]").forEach { styled ->
+                val value = Regex("""(?i)background-image\\s*:\\s*url\\(['"]?([^)'"]+)""")
+                    .find(styled.attr("style"))?.groupValues?.getOrNull(1)
+                usable(value.orEmpty())?.let { return it }
+            }
+            listOf("data-poster", "data-image", "data-src", "data-cover").forEach { key ->
+                usable(wrapper.attr(key))?.let { return it }
+            }
         }
-        return raw?.let { absolute(document, it) }
+        return null
     }
 
     private fun titleOf(element: Element): String {
@@ -188,32 +204,17 @@ class MovyProvider : MainAPI() {
 
     private suspend fun searchResponses(document: Document, forceAnime: Boolean = false): List<SearchResponse> {
         val anchors = cardElements(document)
-        val posterByUrl = coroutineScope {
-            anchors.map { anchor ->
-                async {
-                    val rawUrl = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
-                    val parent = anchor.parent()
-                    val sameUrlAnchors = document.select("a[href]").filter {
-                        (it.absUrl("href").ifBlank { it.attr("href") }).trimEnd('/') == rawUrl
-                    }
-                    val domPoster = sameUrlAnchors.firstNotNullOfOrNull { posterOf(it, document) }
-                        ?: posterOf(anchor, document)
-                        ?: parent?.let { posterOf(it, document) }
-                    val path = try { java.net.URI(rawUrl).path.orEmpty() } catch (_: Exception) { "" }
-                    val isAnimePath = path.contains("/anime/", true)
-                    val isMoviePath = path.contains("/movie/", true)
-                    val cardTitle = titleOf(anchor).ifBlank { parent?.let(::titleOf).orEmpty() }
-                    // Metadata must be tried before the site's DOM image for movies/TV:
-                    // the DOM helper can find a non-poster/lazy placeholder URL that CloudStream
-                    // cannot display. Keep the working anime DOM poster path unchanged.
-                    val poster = if (!isAnimePath && cardTitle.isNotBlank()) {
-                        cataloguePoster(rawUrl, cardTitle, isMoviePath) ?: domPoster
-                    } else {
-                        domPoster
-                    }
-                    rawUrl to poster
-                }
-            }.awaitAll().toMap()
+        // Index duplicate links once instead of rescanning every anchor for every card.
+        val anchorsByUrl = anchors.groupBy { anchor ->
+            anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
+        }
+        val posterByUrl = anchors.associate { anchor ->
+            val rawUrl = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
+            val parent = anchor.parent()
+            val domPoster = anchorsByUrl[rawUrl].orEmpty().firstNotNullOfOrNull {
+                posterOf(it, document)
+            } ?: parent?.let { posterOf(it, document) }
+            rawUrl to domPoster
         }
         val seen = mutableSetOf<String>()
         return anchors.mapNotNull { anchor ->
