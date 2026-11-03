@@ -4,6 +4,8 @@ import com.lagradost.cloudstream3.app
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Document
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -11,7 +13,7 @@ import java.util.Base64
 
 /**
  * Movy's player backend returns encrypted source lists from several nodes.
- * This resolves those lists before CloudStream's normal extractor fallback.
+ * Race the independent nodes and return as soon as a usable source list arrives.
  */
 internal object MovyResolver {
     private const val API = "https://api.wecollege.net"
@@ -46,16 +48,16 @@ internal object MovyResolver {
         )?.groupValues?.get(1).orEmpty()
         val seasonEpisode = findSeasonEpisode(pageUrl, html, doc)
 
-        // The page's serialized Next.js state can contain stale/secondary IDs and
-        // display titles are not always TMDB-canonical. Ask Movy's own TMDB proxy
-        // for canonical title/year/IMDb/season metadata while fetching the seed.
+        // Metadata is optional: do not let a slow metadata lookup hold up playback.
         val initial = coroutineScope {
             val metadataTask = async { fetchMetadata(mediaType, tmdbId) }
             val seedTask = async { fetchSeed(tmdbId) }
-            metadataTask.await() to seedTask.await()
+            val seed = withTimeoutOrNull(7000) { seedTask.await() }
+            val metadata = withTimeoutOrNull(2500) { metadataTask.await() }
+            seed to metadata
         }
-        val metadata = initial.first
-        val seed = initial.second ?: return emptyList()
+        val seed = initial.first ?: return emptyList()
+        val metadata = initial.second
         val title = metadata?.optString(if (isMovie) "title" else "name")
             ?.takeIf { it.isNotBlank() && it != "null" } ?: pageTitle
         if (title.isBlank()) return emptyList()
@@ -81,17 +83,23 @@ internal object MovyResolver {
                 .find(html)?.groupValues?.getOrNull(1)
         if (!totalSeasons.isNullOrBlank()) params["totalSeasons"] = totalSeasons
 
-        // Query the independent source shards concurrently. Serial 12-second
-        // requests could otherwise leave playback spinning for several minutes.
-        val nodeResults = coroutineScope {
-            nodes.map { node ->
+        // All source nodes race in parallel. The first node returning playable
+        // links is enough to start playback; briefly collect other fast responses
+        // without waiting for slow or offline nodes.
+        val query = params.entries.joinToString("&") {
+            URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
+        }
+        return coroutineScope {
+            val resultsChannel = Channel<List<Pair<String, String>>>(Channel.UNLIMITED)
+            val jobs = nodes.map { node ->
                 async {
                     try {
-                        val query = params.entries.joinToString("&") {
-                            URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
-                        }
-                        val response = app.get("$API/$node/sources?$query", headers = headers, timeout = 12).text.trim()
-                        val plain = decrypt(response, seed, tmdbId) ?: return@async emptyList<Pair<String, String>>()
+                        val response = app.get(
+                            "$API/$node/sources?$query",
+                            headers = headers,
+                            timeout = 7
+                        ).text.trim()
+                        val plain = decrypt(response, seed, tmdbId) ?: return@async
                         val json = JSONObject(plain)
                         val found = mutableListOf<Pair<String, String>>()
                         val sources = json.optJSONArray("sources")
@@ -109,27 +117,41 @@ internal object MovyResolver {
                             for (i in 0 until audio.length()) {
                                 val item = audio.optJSONObject(i) ?: continue
                                 val url = item.optString("url").ifBlank { item.optString("file") }.trim()
-                                if (url.startsWith("http")) {
-                                    found.add(url to "Movy · " + item.optString("lang", "Auto"))
-                                }
+                                if (url.startsWith("http")) found.add(url to "Movy · " + item.optString("lang", "Auto"))
                             }
                         }
-                        found
+                        if (found.isNotEmpty()) resultsChannel.send(found)
                     } catch (_: Exception) {
-                        emptyList<Pair<String, String>>()
+                        // A failed node must not delay results from healthy nodes.
                     }
                 }
-            }.awaitAll()
+            }
+
+            val results = linkedMapOf<String, String>()
+            try {
+                val first = withTimeoutOrNull(7500) { resultsChannel.receive() }
+                first?.forEach { (url, label) -> results.putIfAbsent(url, label) }
+                // Small collection window preserves multiple qualities/servers
+                // when they respond together, without waiting for every shard.
+                withTimeoutOrNull(300) {
+                    while (true) {
+                        resultsChannel.receive().forEach { (url, label) ->
+                            results.putIfAbsent(url, label)
+                        }
+                    }
+                }
+            } finally {
+                jobs.forEach { it.cancel() }
+                resultsChannel.cancel()
+            }
+            results.map { it.key to it.value }
         }
-        val results = linkedMapOf<String, String>()
-        nodeResults.flatten().forEach { (url, label) -> results.putIfAbsent(url, label) }
-        return results.map { it.key to it.value }
     }
 
     private suspend fun fetchMetadata(mediaType: String, tmdbId: Int): JSONObject? {
         return try {
             val url = "$DB_API/$mediaType/$tmdbId?append_to_response=external_ids&language=en-US"
-            val body = app.get(url, headers = headers, timeout = 10).text
+            val body = app.get(url, headers = headers, timeout = 5).text
             JSONObject(body).takeIf { it.optInt("id", 0) == tmdbId }
         } catch (_: Exception) {
             null
@@ -138,7 +160,7 @@ internal object MovyResolver {
 
     private suspend fun fetchSeed(tmdbId: Int): String? {
         return try {
-            val body = app.get("$API/seed?mediaId=$tmdbId", headers = headers, timeout = 12).text
+            val body = app.get("$API/seed?mediaId=$tmdbId", headers = headers, timeout = 7).text
             JSONObject(body).optString("seed").takeIf { it.isNotBlank() && it != "null" }
         } catch (_: Exception) {
             null
@@ -147,8 +169,6 @@ internal object MovyResolver {
 
     private fun findTmdbId(pageUrl: String, html: String, doc: Document): Int? {
         val path = try { java.net.URI(pageUrl).path.orEmpty() } catch (_: Exception) { pageUrl }
-        // Movy TV pages use /tv/{tmdbId}/{season}/{episode}; prefer that stable
-        // series ID over numeric IDs embedded in an episode's HTML.
         Regex("^/(?:[a-z]{2}/)?(?:tv|show|series|anime)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
             .find(path)?.groupValues?.getOrNull(1)?.toIntOrNull()
             ?.takeIf { it > 0 }?.let { return it }
@@ -172,15 +192,11 @@ internal object MovyResolver {
 
     private fun findSeasonEpisode(pageUrl: String, html: String, doc: Document): Pair<Int, Int> {
         val path = try { java.net.URI(pageUrl).path.orEmpty() } catch (_: Exception) { pageUrl }
-        // Resolve season/episode directly from Movy's numeric TV route before
-        // scanning page markup, which may contain unrelated episode numbers.
         Regex("^/(?:[a-z]{2}/)?(?:tv|show|series|anime)/\\d+/(\\d+)/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
             .find(path)?.let { match ->
                 val season = match.groupValues[1].toIntOrNull()
                 val episode = match.groupValues[2].toIntOrNull()
-                if (season != null && episode != null && season > 0 && episode > 0) {
-                    return season to episode
-                }
+                if (season != null && episode != null && season > 0 && episode > 0) return season to episode
             }
 
         val combined = pageUrl + " " + doc.title() + " " +
