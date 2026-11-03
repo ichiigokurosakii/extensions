@@ -51,9 +51,9 @@ internal object MovyResolver {
         // Metadata is optional: do not let a slow metadata lookup hold up playback.
         val initial = coroutineScope {
             val metadataTask = async { fetchMetadata(mediaType, tmdbId) }
-            val seedTask = async { fetchSeed(tmdbId) }
-            val seed = withTimeoutOrNull(7000) { seedTask.await() }
+            val seed = fetchSeed(tmdbId)
             val metadata = withTimeoutOrNull(2500) { metadataTask.await() }
+            if (metadata == null) metadataTask.cancel()
             seed to metadata
         }
         val seed = initial.first ?: return emptyList()
