@@ -90,7 +90,7 @@ internal object MovyResolver {
                         val query = params.entries.joinToString("&") {
                             URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
                         }
-                        val response = app.get("$API/$node/sources?$query", headers = headers, timeout = 12).text.trim()
+                        val response = app.get("$API/$node/sources?$query", headers = headers, timeout = 6).text.trim()
                         val plain = decrypt(response, seed, tmdbId) ?: return@async emptyList<Pair<String, String>>()
                         val json = JSONObject(plain)
                         val found = mutableListOf<Pair<String, String>>()
@@ -138,7 +138,7 @@ internal object MovyResolver {
 
     private suspend fun fetchSeed(tmdbId: Int): String? {
         return try {
-            val body = app.get("$API/seed?mediaId=$tmdbId", headers = headers, timeout = 8).text
+            val body = app.get("$API/seed?mediaId=$tmdbId", headers = headers, timeout = 5).text
             JSONObject(body).optString("seed").takeIf { it.isNotBlank() && it != "null" }
         } catch (_: Exception) {
             null
