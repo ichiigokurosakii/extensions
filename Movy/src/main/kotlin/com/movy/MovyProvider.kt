@@ -249,18 +249,74 @@ class MovyProvider : MainAPI() {
         }
     }
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val base = request.data
-        val url = when {
-            page <= 1 -> base
-            base.contains("?") -> "$base&page=$page"
-            else -> "$base?page=$page"
+    private val mainPageCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<SearchResponse>>>()
+
+    private suspend fun metadataMainPage(page: Int, section: String): List<SearchResponse> {
+        val endpoint = when (section.lowercase()) {
+            "movies" -> "trending/movie/week?language=en-US"
+            "tv shows" -> "tv/popular?language=en-US"
+            "anime" -> "discover/tv?with_genres=16&with_origin_country=JP&sort_by=popularity.desc&language=en-US"
+            else -> "trending/movie/week?language=en-US"
         }
-        val document = getDocument(url)
-        val results = searchResponses(document, forceAnime = base.contains("/browse/anime", ignoreCase = true) || request.name.equals("Anime", ignoreCase = true))
-        val sectionName = request.name
+        val cacheKey = "$endpoint&page=$page"
+        val now = System.currentTimeMillis()
+        mainPageCache[cacheKey]?.let { cached ->
+            if (now - cached.first < 180_000L) return cached.second
+        }
+
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+            "Referer" to "$mainUrl/",
+            "Accept" to "application/json, text/plain, */*"
+        )
+        val json = JSONObject(app.get(
+            "https://db.wecollege.net/3/$endpoint&page=$page",
+            headers = headers,
+            timeout = 5
+        ).text)
+        val items = json.optJSONArray("results") ?: return emptyList()
+        val isMovie = section.equals("Movies", true)
+        val isAnime = section.equals("Anime", true)
+        val results = buildList {
+            for (i in 0 until items.length()) {
+                val item = items.optJSONObject(i) ?: continue
+                val id = item.optInt("id", 0)
+                if (id <= 0) continue
+                val title = (if (isMovie) item.optString("title") else item.optString("name"))
+                    .takeIf { it.isNotBlank() && it != "null" } ?: continue
+                val posterPath = item.optString("poster_path")
+                    .takeIf { it.isNotBlank() && it != "null" }
+                val poster = posterPath?.let {
+                    if (it.startsWith("http://") || it.startsWith("https://")) it
+                    else "https://image.tmdb.org/t/p/w500$it"
+                }
+                val overview = item.optString("overview").takeIf { it.isNotBlank() && it != "null" }
+                val route = if (isMovie) "$mainUrl/movie/$id" else "$mainUrl/tv/$id"
+                val url = if (isAnime) {
+                    route + "?csType=anime&csTitle=" + URLEncoder.encode(title, "UTF-8") +
+                        (overview?.let { "&csPlot=" + URLEncoder.encode(it, "UTF-8") } ?: "")
+                } else route
+                if (isMovie) {
+                    add(newMovieSearchResponse(title, url, TvType.Movie) { posterUrl = poster })
+                } else {
+                    add(newTvSeriesSearchResponse(title, url, if (isAnime) TvType.Anime else TvType.TvSeries) {
+                        posterUrl = poster
+                    })
+                }
+            }
+        }
+        mainPageCache[cacheKey] = now to results
+        return results
+    }
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val results = try {
+            metadataMainPage(page, request.name)
+        } catch (_: Exception) {
+            emptyList()
+        }
         return newHomePageResponse(
-            listOf(HomePageList(sectionName, results, isHorizontalImages = false)),
+            listOf(HomePageList(request.name, results, isHorizontalImages = false)),
             hasNext = results.isNotEmpty()
         )
     }
