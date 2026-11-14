@@ -90,7 +90,7 @@ internal object MovyResolver {
                         val query = params.entries.joinToString("&") {
                             URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
                         }
-                        val response = app.get("$API/$node/sources?$query", headers = headers, timeout = 12).text.trim()
+                        val response = app.get("$API/$node/sources?$query", headers = headers, timeout = 3).text.trim()
                         val plain = decrypt(response, seed, tmdbId) ?: return@async emptyList<Pair<String, String>>()
                         val json = JSONObject(plain)
                         val found = mutableListOf<Pair<String, String>>()
@@ -129,7 +129,7 @@ internal object MovyResolver {
     private suspend fun fetchMetadata(mediaType: String, tmdbId: Int): JSONObject? {
         return try {
             val url = "$DB_API/$mediaType/$tmdbId?append_to_response=external_ids&language=en-US"
-            val body = app.get(url, headers = headers, timeout = 7).text
+            val body = app.get(url, headers = headers, timeout = 2).text
             JSONObject(body).takeIf { it.optInt("id", 0) == tmdbId }
         } catch (_: Exception) {
             null
@@ -138,7 +138,7 @@ internal object MovyResolver {
 
     private suspend fun fetchSeed(tmdbId: Int): String? {
         return try {
-            val body = app.get("$API/seed?mediaId=$tmdbId", headers = headers, timeout = 8).text
+            val body = app.get("$API/seed?mediaId=$tmdbId", headers = headers, timeout = 3).text
             JSONObject(body).optString("seed").takeIf { it.isNotBlank() && it != "null" }
         } catch (_: Exception) {
             null
