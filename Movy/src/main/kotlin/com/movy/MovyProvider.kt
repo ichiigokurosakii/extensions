@@ -879,42 +879,37 @@ class MovyProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = getDocument(data)
+        // Use a shorter page request timeout for playback. The resolver only
+        // needs the page HTML to identify the title, TMDB ID and episode.
+        val document = app.get(data, timeout = 5).document
 
-        // Movy's own backend returns encrypted multi-server source lists; resolve these first.
+        // Movy's encrypted source API already returns direct media URLs. Send
+        // them straight to CloudStream instead of probing each one sequentially
+        // through loadExtractor(), which adds avoidable delay.
         val resolved = try { MovyResolver.resolve(data, document) } catch (_: Exception) { emptyList() }
         var found = false
         resolved.forEach { (url, label) ->
             try {
-                val handled = loadExtractor(url, subtitleCallback) { link ->
-                    callback(link)
-                    found = true
+                val linkType = when {
+                    url.contains(".mp4", true) -> ExtractorLinkType.VIDEO
+                    url.contains(".mpd", true) -> ExtractorLinkType.DASH
+                    else -> ExtractorLinkType.M3U8
                 }
-                if (!handled) {
-                    // Resolver payloads are already direct media URLs. Some CDN
-                    // URLs are signed/extensionless, so do not discard them just
-                    // because their path lacks .m3u8 or .mp4.
-                    val linkType = when {
-                        url.contains(".mp4", true) -> ExtractorLinkType.VIDEO
-                        url.contains(".mpd", true) -> ExtractorLinkType.DASH
-                        else -> ExtractorLinkType.M3U8
+                callback(
+                    newExtractorLink(
+                        source = "Movy",
+                        name = label,
+                        url = url,
+                        type = linkType
+                    ) {
+                        referer = "$mainUrl/"
+                        headers = mapOf(
+                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+                            "Origin" to mainUrl
+                        )
                     }
-                    callback(
-                        newExtractorLink(
-                            source = "Movy",
-                            name = label,
-                            url = url,
-                            type = linkType
-                        ) {
-                            referer = "$mainUrl/"
-                            headers = mapOf(
-                                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-                                "Origin" to mainUrl
-                            )
-                        }
-                    )
-                    found = true
-                } else found = true
+                )
+                found = true
             } catch (_: Exception) { }
         }
 
