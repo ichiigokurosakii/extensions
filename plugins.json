@@ -1,0 +1,42 @@
+[
+    {
+        "fileHash": "sha256-8c019bf0eb836d9bfd60e761293c761b08963ec1438a6705a51bde6c2aa11254",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ichiigokurosakii/extensions",
+        "fileSize": 10704,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "ichiigokurosakii"
+        ],
+        "tvTypes": [
+            "TvSeries"
+        ],
+        "version": 1,
+        "internalName": "FullMatchShows",
+        "description": "Browse FullMatchShows match replay listings",
+        "url": "https://raw.githubusercontent.com/ichiigokurosakii/extensions/builds/FullMatchShows.cs3",
+        "name": "FullMatchShows"
+    },
+    {
+        "fileHash": "sha256-b55b57b406be3d4636cbcd943901a340dbdb53d43cb10a1411615f4c68b4fcb1",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ichiigokurosakii/extensions",
+        "fileSize": 66313,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "ichiigokurosakii"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "version": 26,
+        "internalName": "Movy",
+        "description": "Browse movies, TV shows, anime, and available streaming sources from Movy",
+        "url": "https://raw.githubusercontent.com/ichiigokurosakii/extensions/builds/Movy.cs3",
+        "name": "Movy"
+    }
+]

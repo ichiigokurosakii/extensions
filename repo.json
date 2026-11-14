@@ -1,0 +1,8 @@
+{
+  "name": "Rupinder's Extensions",
+  "description": "Independent CloudStream provider for match replay listings",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/ichiigokurosakii/extensions/builds/plugins.json"
+  ]
+}
