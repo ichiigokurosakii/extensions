@@ -269,12 +269,20 @@ class MovyProvider : MainAPI() {
             "Referer" to "$mainUrl/",
             "Accept" to "application/json, text/plain, */*"
         )
-        val json = JSONObject(app.get(
-            "https://db.wecollege.net/3/$endpoint&page=$page",
-            headers = headers,
-            timeout = 5
-        ).text)
-        val items = json.optJSONArray("results") ?: return emptyList()
+        val responseText = try {
+            app.get(
+                "https://db.wecollege.net/3/$endpoint&page=$page",
+                headers = headers,
+                timeout = 5
+            ).text
+        } catch (_: Exception) {
+            return mainPageCache[cacheKey]?.second.orEmpty()
+        }
+        val items = try {
+            JSONObject(responseText).optJSONArray("results")
+        } catch (_: Exception) {
+            null
+        } ?: return mainPageCache[cacheKey]?.second.orEmpty()
         val isMovie = section.equals("Movies", true)
         val isAnime = section.equals("Anime", true)
         val results = buildList {
