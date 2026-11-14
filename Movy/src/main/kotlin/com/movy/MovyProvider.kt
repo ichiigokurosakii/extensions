@@ -204,31 +204,25 @@ class MovyProvider : MainAPI() {
 
     private suspend fun searchResponses(document: Document, forceAnime: Boolean = false): List<SearchResponse> {
         val anchors = cardElements(document)
-        // Index duplicate links once instead of rescanning every anchor for every card.
-        val anchorsByUrl = anchors.groupBy { anchor ->
-            anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
-        }
-        val posterByUrl = anchors.associate { anchor ->
-            val rawUrl = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
-            val parent = anchor.parent()
-            val domPoster = anchorsByUrl[rawUrl].orEmpty().firstNotNullOfOrNull {
-                posterOf(it, document)
-            } ?: parent?.let { posterOf(it, document) }
-            rawUrl to domPoster
-        }
         val seen = mutableSetOf<String>()
         return anchors.mapNotNull { anchor ->
             val rawUrl = anchor.absUrl("href").ifBlank { anchor.attr("href") }.trimEnd('/')
-            val isMovie = rawUrl.contains("/movie/")
-            val rawPath = try { java.net.URI(rawUrl).path.orEmpty() } catch (_: Exception) { "" }
-            // Movy's anime catalogue points anime series to ordinary /tv/{tmdbId}
-            // pages. Carry the catalogue type in a harmless query marker so load()
-            // can use anime metadata without changing normal TV-series behavior.
-            val isAnime = !isMovie && (rawUrl.contains("/anime/") ||
-                (forceAnime && Regex("^/(?:[a-z]{2}/)?tv/\\d+(?:/|$)", RegexOption.IGNORE_CASE).containsMatchIn(rawPath)))
+            if (rawUrl.isBlank() || !seen.add(rawUrl)) return@mapNotNull null
+
+            val path = try { java.net.URI(rawUrl).path.orEmpty() } catch (_: Exception) { "" }
+            val isMovie = path.contains("/movie/", true)
+            val isAnime = !isMovie && (path.contains("/anime/", true) ||
+                (forceAnime && Regex("^/(?:[a-z]{2}/)?tv/\\d+(?:/|$)", RegexOption.IGNORE_CASE).containsMatchIn(path)))
+
             val parent = anchor.parent()
             val title = titleOf(anchor).ifBlank { parent?.let(::titleOf).orEmpty() }
-            if (title.isBlank() || rawUrl.isBlank()) return@mapNotNull null
+            if (title.isBlank()) return@mapNotNull null
+
+            // Extract the poster once per card. The previous implementation built
+            // a separate poster map and then repeated the same DOM traversal for
+            // cards whose image was not found on the first pass.
+            val poster = posterOf(anchor, document) ?: parent?.let { posterOf(it, document) }
+
             val cardPlot = sequenceOf(anchor, parent, parent?.parent())
                 .filterNotNull()
                 .flatMap { element ->
@@ -240,14 +234,13 @@ class MovyProvider : MainAPI() {
                 }
                 .map { it.trim() }
                 .firstOrNull { it.length >= 50 && it.length <= 1200 && !it.contains("Movy - Watch Free", true) }
-            // Carry anime identity, title and any real card synopsis to detail loading.
+
             val url = if (isAnime) {
                 val marker = "csType=anime&csTitle=" + URLEncoder.encode(title, "UTF-8") +
                     (cardPlot?.let { "&csPlot=" + URLEncoder.encode(it, "UTF-8") } ?: "")
                 rawUrl + (if (rawUrl.contains("?")) "&" else "?") + marker
             } else rawUrl
-            if (!seen.add(url)) return@mapNotNull null
-            val poster = posterByUrl[rawUrl] ?: posterOf(anchor, document) ?: parent?.let { posterOf(it, document) }
+
             if (isMovie) newMovieSearchResponse(title, url, TvType.Movie) {
                 posterUrl = poster
             } else newTvSeriesSearchResponse(title, url, if (isAnime) TvType.Anime else TvType.TvSeries) {
