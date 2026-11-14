@@ -6,6 +6,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.json.JSONObject
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -261,7 +262,7 @@ class MovyProvider : MainAPI() {
         val cacheKey = "$endpoint&page=$page"
         val now = System.currentTimeMillis()
         mainPageCache[cacheKey]?.let { cached ->
-            if (now - cached.first < 180_000L) return cached.second
+            if (now - cached.first < 1_800_000L) return cached.second
         }
 
         val headers = mapOf(
@@ -273,7 +274,9 @@ class MovyProvider : MainAPI() {
             app.get(
                 "https://db.wecollege.net/3/$endpoint&page=$page",
                 headers = headers,
-                timeout = 5
+                timeout = 5,
+                cacheTime = 30,
+                cacheUnit = TimeUnit.MINUTES
             ).text
         } catch (_: Exception) {
             return mainPageCache[cacheKey]?.second.orEmpty()
