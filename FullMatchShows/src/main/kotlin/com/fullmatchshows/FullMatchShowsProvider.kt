@@ -3,9 +3,6 @@ package com.fullmatchshows
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.loadExtractor
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -139,25 +136,19 @@ class FullMatchShowsProvider : MainAPI() {
             )
         }
 
-        // Only fetch a match page when its catalogue card has no usable image.
-        // Keep fallback requests concurrent but bounded so catalogue loading stays responsive.
-        return coroutineScope {
-            entries.chunked(6).flatMap { batch ->
-                batch.map { (url, title, cardPoster) ->
-                    async {
-                        // Prefer the poster explicitly published by the match page.
-                        // The catalogue thumbnail remains a fallback if metadata is absent.
-                        val poster = runCatching {
-                            metadataPoster(app.get(url, timeout = 12).document)
-                        }.getOrNull() ?: cardPoster
+        // Use the catalogue image immediately. If it is missing, fetch the
+        // match page's Open Graph/Twitter metadata as a poster fallback.
+        val results = mutableListOf<SearchResponse>()
+        for ((url, title, cardPoster) in entries) {
+            val poster = cardPoster ?: runCatching {
+                metadataPoster(app.get(url, timeout = 12).document)
+            }.getOrNull()
 
-                        newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
-                            posterUrl = poster
-                        }
-                    }
-                }.awaitAll()
-            }
+            results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+                posterUrl = poster
+            })
         }
+        return results
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
