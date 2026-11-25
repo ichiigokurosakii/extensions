@@ -19,6 +19,14 @@ class FullMatchShowsProvider : MainAPI() {
 
     private suspend fun doc(url: String): Document = app.get(url, timeout = 20).document
 
+    private fun absoluteAssetUrl(element: Element, raw: String): String? {
+        return runCatching {
+            java.net.URI(element.baseUri()).resolve(raw).toString()
+        }.getOrNull()?.takeIf {
+            it.startsWith("http://", true) || it.startsWith("https://", true)
+        }
+    }
+
     /**
      * Resolve the real image URL used by WordPress themes and lazy-load plugins.
      * Prefer lazy-load attributes over placeholder src values.
@@ -43,10 +51,7 @@ class FullMatchShowsProvider : MainAPI() {
                 raw.startsWith("javascript:", true) || raw == "#"
             ) continue
 
-            val resolved = element.absUrl(attribute).ifBlank { raw }
-            if (resolved.startsWith("http://", true) ||
-                resolved.startsWith("https://", true)
-            ) return resolved
+            absoluteAssetUrl(element, raw)?.let { return it }
         }
 
         val srcSet = element.attr("data-srcset").ifBlank {
@@ -56,11 +61,9 @@ class FullMatchShowsProvider : MainAPI() {
             val candidates = srcSet.split(",").mapNotNull { candidate ->
                 val raw = candidate.trim().substringBefore(" ").trim()
                 if (raw.isBlank() || raw.startsWith("data:", true)) null
-                else element.absUrl("src").takeIf { it.isNotBlank() && raw == element.attr("src") }
-                    ?: raw
+                else absoluteAssetUrl(element, raw)
             }
-            candidates.lastOrNull { it.startsWith("http://") || it.startsWith("https://") }
-                ?.let { return it }
+            candidates.lastOrNull()?.let { return it }
         }
 
         // Some themes render catalogue thumbnails as CSS background images.
@@ -70,8 +73,7 @@ class FullMatchShowsProvider : MainAPI() {
             RegexOption.IGNORE_CASE
         ).find(style)?.groupValues?.getOrNull(1)
         if (!backgroundUrl.isNullOrBlank()) {
-            val resolved = element.absUrl("style").ifBlank { backgroundUrl }
-            if (resolved.startsWith("http://") || resolved.startsWith("https://")) return resolved
+            absoluteAssetUrl(element, backgroundUrl)?.let { return it }
         }
 
         return null
