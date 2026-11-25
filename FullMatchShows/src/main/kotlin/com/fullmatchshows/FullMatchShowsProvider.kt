@@ -147,9 +147,11 @@ class FullMatchShowsProvider : MainAPI() {
             entries.chunked(6).flatMap { batch ->
                 batch.map { (url, title, cardPoster) ->
                     async {
-                        val poster = cardPoster ?: runCatching {
-                            metadataPoster(doc(url))
-                        }.getOrNull()
+                        // Prefer the poster explicitly published by the match page.
+                        // The catalogue thumbnail remains a fallback if metadata is absent.
+                        val poster = runCatching {
+                            metadataPoster(app.get(url, timeout = 12).document)
+                        }.getOrNull() ?: cardPoster
 
                         newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
                             posterUrl = poster
@@ -182,9 +184,11 @@ class FullMatchShowsProvider : MainAPI() {
     private fun videoLinksArea(document: Document): Element? {
         val explicitSection = document.selectFirst(
             ".video-links, .match-links, .watch-links, .stream-links, " +
-                ".video-section, .match-video-links, .match-streams, .player-links, " +
-                "[class*=video-link], [class*=match-link], [class*=stream-link]"
-        )
+                ".video-section, .match-video-links, .match-streams, .player-links"
+        ) ?: document.select(
+            "[class*=video-link], [class*=match-link], [class*=stream-link]"
+        ).firstOrNull { it.select("a[href]").isNotEmpty() }
+
         if (explicitSection != null && explicitSection.select("a[href]").isNotEmpty()) {
             return explicitSection
         }
