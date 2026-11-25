@@ -81,16 +81,14 @@ class FullMatchShowsProvider : MainAPI() {
 
     /** Read the image explicitly published by the match page's social/share metadata. */
     private fun metadataPoster(document: Document): String? {
-        val metadata = document.selectFirst(
+        return document.select(
             "meta[property=og:image], meta[property=og:image:secure_url], " +
                 "meta[name=twitter:image], meta[property=twitter:image], link[rel=image_src]"
-        ) ?: return null
-
-        val attribute = if (metadata.tagName() == "link") "href" else "content"
-        return imageFrom(metadata)
-            ?: metadata.absUrl(attribute).takeIf {
-                it.startsWith("http://", true) || it.startsWith("https://", true)
-            }
+        ).firstNotNullOfOrNull { metadata ->
+            val attribute = if (metadata.tagName() == "link") "href" else "content"
+            imageFrom(metadata)
+                ?: absoluteAssetUrl(metadata, metadata.attr(attribute).trim())
+        }
     }
 
     private fun cardImage(anchor: Element): String? {
@@ -207,7 +205,9 @@ class FullMatchShowsProvider : MainAPI() {
             val href = anchor.absUrl("href").trim()
             val label = anchor.text().trim().ifBlank {
                 anchor.attr("title").trim().ifBlank {
-                    anchor.attr("aria-label").trim()
+                    anchor.attr("aria-label").trim().ifBlank {
+                        anchor.selectFirst("img[alt]")?.attr("alt")?.trim().orEmpty()
+                    }
                 }
             }
 
@@ -218,7 +218,7 @@ class FullMatchShowsProvider : MainAPI() {
                 href.startsWith("tel:", true) ||
                 href.startsWith(mainUrl, ignoreCase = true) ||
                 !href.startsWith("http://", true) && !href.startsWith("https://", true) ||
-                !seen.add(href)
+                !seen.add("$href|$label")
             ) return@mapNotNull null
 
             newEpisode(href) {
