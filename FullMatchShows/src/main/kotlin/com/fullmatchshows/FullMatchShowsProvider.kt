@@ -202,7 +202,15 @@ class FullMatchShowsProvider : MainAPI() {
                 }
             }
 
+            val isHighlight = href.contains("highlight", ignoreCase = true) ||
+                label.contains("highlight", ignoreCase = true)
+            val isTelegramPromo = href.contains("t.me/", ignoreCase = true) ||
+                href.contains("telegram.me", ignoreCase = true) ||
+                label.contains("telegram", ignoreCase = true) ||
+                label.contains("join our channel", ignoreCase = true)
+
             if (href.isBlank() || label.isBlank() ||
+                isHighlight || isTelegramPromo ||
                 href == pageUrl || href.startsWith("#") ||
                 href.startsWith("javascript:", true) ||
                 href.startsWith("mailto:", true) ||
